@@ -1,7 +1,7 @@
 """Minimal structured (JSON-lines) logging configured from Settings.
 
-Secret values from Settings are redacted from every log record as a defence in depth;
-code should still never pass secrets to a logger.
+Secret values from Settings are redacted from every emitted line (message, `extra=` fields
+and tracebacks) as a defence in depth; code should still never pass secrets to a logger.
 """
 
 import json
@@ -21,10 +21,19 @@ _STANDARD_ATTRS = frozenset(
 
 
 class JsonFormatter(logging.Formatter):
-    """Render log records as single-line JSON objects."""
+    """Render log records as single-line JSON objects, redacting known secrets.
+
+    Redaction runs on the final serialised line, so it covers the message, every `extra=`
+    field and formatted tracebacks alike.
+    """
+
+    def __init__(self, secrets: list[str] | None = None) -> None:
+        """Store the non-empty secret strings to redact from every emitted line."""
+        super().__init__()
+        self._secrets = _redaction_needles(secrets or [])
 
     def format(self, record: logging.LogRecord) -> str:
-        """Serialise the record, including any `extra=` fields, to JSON."""
+        """Serialise the record, including any `extra=` fields, to redacted JSON."""
         payload: dict[str, object] = {
             "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
@@ -36,7 +45,29 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = value
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
-        return json.dumps(payload, default=str)
+        if record.stack_info:
+            payload["stack_info"] = self.formatStack(record.stack_info)
+        return self._redact(json.dumps(payload, default=str))
+
+    def _redact(self, line: str) -> str:
+        """Replace every occurrence of a secret (raw or JSON-escaped) in `line`."""
+        for needle in self._secrets:
+            line = line.replace(needle, REDACTED)
+        return line
+
+
+def _redaction_needles(secrets: list[str]) -> list[str]:
+    """Return each secret plus its JSON-escaped form, longest first, without empties.
+
+    `json.dumps` escapes quotes, backslashes, control and non-ASCII characters, so a secret
+    containing any of them would not match its raw value in serialised output.
+    """
+    needles: set[str] = set()
+    for secret in secrets:
+        if secret:
+            needles.add(secret)
+            needles.add(json.dumps(secret)[1:-1])
+    return sorted(needles, key=len, reverse=True)
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -79,7 +110,8 @@ def configure_logging(settings: Settings) -> None:
             root.removeHandler(existing)
     handler = logging.StreamHandler(sys.stdout)
     handler.set_name(_HANDLER_NAME)
-    handler.setFormatter(JsonFormatter())
-    handler.addFilter(SecretRedactingFilter(_secret_values(settings)))
+    secrets = _secret_values(settings)
+    handler.setFormatter(JsonFormatter(secrets))
+    handler.addFilter(SecretRedactingFilter(secrets))
     root.addHandler(handler)
     root.setLevel(settings.log_level)

@@ -114,11 +114,6 @@ def test_filter_without_secrets_leaves_record_untouched() -> None:
     assert record.args == ("b",)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: SecretRedactingFilter only redacts record.msg; `extra=` fields are "
-    "serialised by JsonFormatter unredacted (src/studiodesk/logging.py:34-36, 50-58).",
-)
 def test_secret_in_extra_field_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     """A secret passed via `extra=` must not reach the log output either."""
     configure_logging(Settings(_env_file=None, anthropic_api_key=SECRET_STR))
@@ -128,11 +123,6 @@ def test_secret_in_extra_field_is_redacted(capsys: pytest.CaptureFixture[str]) -
     assert SECRET not in capsys.readouterr().out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: exception text (exc_info) is formatted after filtering and is never "
-    "redacted (src/studiodesk/logging.py:37-38).",
-)
 def test_secret_in_exception_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     """A secret embedded in an exception message must not reach the log output."""
     configure_logging(Settings(_env_file=None, anthropic_api_key=SECRET_STR))
