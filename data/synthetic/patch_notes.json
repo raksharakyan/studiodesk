@@ -1,0 +1,364 @@
+[
+  {
+    "id": "PATCH-1.0.1",
+    "type": "patch_note",
+    "version": "1.0.1",
+    "released_at": "2026-02-12",
+    "summary": "First hotfix for Starfall Outpost, focused on co-op stability and save safety.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0002",
+        "description": "Oxygen reactor output now replicates correctly after host migration."
+      },
+      {
+        "bug_id": "BUG-0001",
+        "description": "Cryo-sleep autosaves are now written atomically; suspending the console mid-save no longer corrupts the save or its backup."
+      },
+      {
+        "bug_id": "BUG-0003",
+        "description": "Fixed Switch friend invites failing with error SO-4012."
+      },
+      {
+        "bug_id": "BUG-0009",
+        "description": "Subtitles no longer overlap the radio comms box in handheld mode."
+      }
+    ],
+    "known_issues": [
+      "Hover-rover can fall through terrain in Ridge Canyon."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.1.0",
+    "type": "patch_note",
+    "version": "1.1.0",
+    "released_at": "2026-03-05",
+    "summary": "The Frozen Belt update: a new ice moon, the ORB-7 companion drone and thermal suits, plus a batch of launch fixes.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0004",
+        "description": "Fixed the hover-rover falling through steep terrain in Ridge Canyon."
+      },
+      {
+        "bug_id": "BUG-0005",
+        "description": "Building placement preview now matches the final position on slopes."
+      },
+      {
+        "bug_id": "BUG-0016",
+        "description": "Fusion Welding now unlocks when its requirements are met."
+      },
+      {
+        "bug_id": "BUG-0007",
+        "description": "Dust storm ambience now stops when the storm ends."
+      },
+      {
+        "bug_id": "BUG-0017",
+        "description": "DualSense trigger resistance resets when the drill is holstered."
+      }
+    ],
+    "known_issues": [
+      "Large hydroponic farms can reduce frame rate."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.1.1",
+    "type": "patch_note",
+    "version": "1.1.1",
+    "released_at": "2026-03-17",
+    "summary": "Hotfix for Frozen Belt stability on Switch and voice chat in 4-player sessions.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0018",
+        "description": "Fixed a crash when docking or undocking during loading screens."
+      },
+      {
+        "bug_id": "BUG-0027",
+        "description": "Proximity voice chat now supports all players in a session."
+      },
+      {
+        "bug_id": "BUG-0025",
+        "description": "Ice caves are now correctly lit in handheld mode."
+      },
+      {
+        "bug_id": "BUG-0024",
+        "description": "ORB-7 no longer gets stuck in airlock doors."
+      }
+    ],
+    "known_issues": [
+      "Long sessions on Xbox Series S may run out of memory."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.2.0",
+    "type": "patch_note",
+    "version": "1.2.0",
+    "released_at": "2026-04-09",
+    "summary": "The Deep Core update: mining lasers, Tier 2 fusion reactors and cross-save.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0031",
+        "description": "Fixed an item duplication exploit during host migration."
+      },
+      {
+        "bug_id": "BUG-0008",
+        "description": "Hydroponic planters are now instanced, greatly improving performance in large farms."
+      },
+      {
+        "bug_id": "BUG-0029",
+        "description": "Thermal suit gauge now respects the Units setting."
+      },
+      {
+        "bug_id": "BUG-0035",
+        "description": "'Signal in the Ice' marker now points to the correct crater."
+      },
+      {
+        "bug_id": "BUG-0032",
+        "description": "Mouse cursor no longer appears in gamepad mode after alt-tab."
+      }
+    ],
+    "known_issues": [
+      "Long sessions on Xbox Series S may run out of memory."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.2.1",
+    "type": "patch_note",
+    "version": "1.2.1",
+    "released_at": "2026-04-21",
+    "summary": "Critical fix for the cross-save conflict dialog and long-session memory growth.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0034",
+        "description": "Fixed memory growth from weather effects during long sessions."
+      },
+      {
+        "bug_id": "BUG-0042",
+        "description": "'Keep Local' and 'Keep Cloud' in the cross-save dialog now do what they say."
+      },
+      {
+        "bug_id": "BUG-0038",
+        "description": "Friends-only lobbies now accept cross-platform Starfall friends."
+      },
+      {
+        "bug_id": "BUG-0020",
+        "description": "Automatic matchmaking region now prefers the nearest region."
+      }
+    ],
+    "known_issues": [
+      "Tutorial can stall if the oxygen reactor is built early."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.3.0",
+    "type": "patch_note",
+    "version": "1.3.0",
+    "released_at": "2026-05-14",
+    "summary": "Outpost Alliance: 8-player co-op, trade terminals and shared research.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0036",
+        "description": "Tier 2 reactor power graph no longer shows negative values."
+      },
+      {
+        "bug_id": "BUG-0040",
+        "description": "Improved HDR calibration range."
+      },
+      {
+        "bug_id": "BUG-0046",
+        "description": "Added missing footstep sounds on Deep Core grating (Switch)."
+      },
+      {
+        "bug_id": "BUG-0043",
+        "description": "Oxygen reactors resume production correctly after loading a save."
+      },
+      {
+        "bug_id": "BUG-0037",
+        "description": "Boulders no longer get launched when a neighbour is mined."
+      }
+    ],
+    "known_issues": [
+      "Hosting 8-player sessions on PS5 can cause periodic hitches.",
+      "Tutorial can stall if the oxygen reactor is built early."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.3.1",
+    "type": "patch_note",
+    "version": "1.3.1",
+    "released_at": "2026-05-27",
+    "summary": "Performance and progression fixes for Outpost Alliance.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0050",
+        "description": "Reduced host CPU cost of replication in 8-player sessions."
+      },
+      {
+        "bug_id": "BUG-0051",
+        "description": "Trade terminals are now locked to one player at a time."
+      },
+      {
+        "bug_id": "BUG-0048",
+        "description": "The tutorial reactor objective completes if the reactor was built early."
+      },
+      {
+        "bug_id": "BUG-0026",
+        "description": "Cold Feet trophy now unlocks correctly."
+      },
+      {
+        "bug_id": "BUG-0047",
+        "description": "Aim assist no longer affects the mining laser."
+      }
+    ],
+    "known_issues": [
+      "Texture pop-in in the Deep Core on Switch."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.4.0",
+    "type": "patch_note",
+    "version": "1.4.0",
+    "released_at": "2026-06-18",
+    "summary": "Storm Season: dynamic lightning storms, lightning rods, storm shutters and wind power.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0053",
+        "description": "Rover passengers now see smooth vehicle movement."
+      },
+      {
+        "bug_id": "BUG-0058",
+        "description": "Restored texture streaming budget on Switch."
+      },
+      {
+        "bug_id": "BUG-0057",
+        "description": "Power wires now follow the colourblind palette."
+      },
+      {
+        "bug_id": "BUG-0022",
+        "description": "Fixed shadow flicker in habitat domes at dusk."
+      },
+      {
+        "bug_id": "BUG-0056",
+        "description": "Reduced the GPU cost of many simultaneous mining lasers."
+      }
+    ],
+    "known_issues": [
+      "Lightning can damage anchored structures near lightning rods."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.4.1",
+    "type": "patch_note",
+    "version": "1.4.1",
+    "released_at": "2026-07-02",
+    "summary": "Storm Season hotfix for lightning rods and client movement.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0059",
+        "description": "Lightning rods now protect anchored structures within 30 m."
+      },
+      {
+        "bug_id": "BUG-0061",
+        "description": "Eye of the Storm trophy now unlocks."
+      },
+      {
+        "bug_id": "BUG-0041",
+        "description": "Reduced client rubberbanding in the Deep Core mines."
+      },
+      {
+        "bug_id": "BUG-0033",
+        "description": "Fixed radio crackle with PS Link headsets."
+      }
+    ],
+    "known_issues": [
+      "Loading an autosave made during a storm can spawn a second storm."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  },
+  {
+    "id": "PATCH-1.4.2",
+    "type": "patch_note",
+    "version": "1.4.2",
+    "released_at": "2026-07-16",
+    "summary": "Small quality-of-life patch for Storm Season.",
+    "fixes": [
+      {
+        "bug_id": "BUG-0062",
+        "description": "Loading a save made during a storm no longer spawns a second storm."
+      },
+      {
+        "bug_id": "BUG-0063",
+        "description": "Rain is now muffled inside sealed habitat modules."
+      },
+      {
+        "bug_id": "BUG-0064",
+        "description": "Wind turbines now generate power during storms."
+      },
+      {
+        "bug_id": "BUG-0065",
+        "description": "Habitat doors open on the first Joy-Con press."
+      }
+    ],
+    "known_issues": [
+      "Storm shutters do not show snap points on curved dome walls.",
+      "Rover horn may play twice."
+    ],
+    "platforms": [
+      "pc",
+      "ps5",
+      "xbox_series",
+      "switch"
+    ]
+  }
+]
