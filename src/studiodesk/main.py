@@ -25,11 +25,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings if settings is not None else get_settings()
     configure_logging(resolved)
 
+    is_prod = resolved.app_env == "prod"
     app = FastAPI(
         title="StudioDesk",
         version=resolved.app_version,
-        docs_url=None if resolved.app_env == "prod" else "/docs",
+        docs_url=None if is_prod else "/docs",
         redoc_url=None,
+        openapi_url=None if is_prod else "/openapi.json",
     )
     if settings is not None:
         app.dependency_overrides[get_settings] = lambda: settings
