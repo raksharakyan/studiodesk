@@ -132,3 +132,28 @@ def test_secret_in_exception_is_redacted(capsys: pytest.CaptureFixture[str]) -> 
         logging.getLogger("studiodesk.test").exception("llm call failed")
 
     assert SECRET not in capsys.readouterr().out
+
+
+def test_stack_info_included_and_redacted(capsys: pytest.CaptureFixture[str]) -> None:
+    """stack_info is emitted and passes through redaction."""
+    configure_logging(Settings(_env_file=None, anthropic_api_key=SECRET_STR))
+
+    logging.getLogger("studiodesk.test").info("trace", stack_info=True, extra={"k": SECRET})
+
+    out = capsys.readouterr().out
+    record = _lines(out)[-1]
+    assert "Stack (most recent call last)" in str(record["stack_info"])
+    assert SECRET not in out
+
+
+def test_secret_with_json_escaped_chars_redacted(capsys: pytest.CaptureFixture[str]) -> None:
+    """Secrets containing quotes/backslashes/non-ASCII are redacted after JSON escaping."""
+    tricky = 'p"a\\ssé-word'
+    configure_logging(Settings(_env_file=None, qdrant_api_key=SecretStr(tricky)))
+
+    logging.getLogger("studiodesk.test").info("x", extra={"cred": tricky})
+
+    out = capsys.readouterr().out
+    assert tricky not in out
+    assert json.dumps(tricky)[1:-1] not in out
+    assert _lines(out)[-1]["cred"] == REDACTED

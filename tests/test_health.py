@@ -72,6 +72,17 @@ def test_docs_disabled_in_prod() -> None:
     assert client.get("/redoc").status_code == 404
 
 
+@pytest.mark.parametrize(("env", "expected"), [("dev", 200), ("test", 200), ("prod", 404)])
+def test_openapi_schema_only_outside_prod(env: str, expected: int) -> None:
+    """The OpenAPI schema is served in dev/test and hidden in prod."""
+    app = create_app(Settings(_env_file=None, app_env=env))  # type: ignore[arg-type]
+    response = TestClient(app).get("/openapi.json")
+
+    assert response.status_code == expected
+    if expected == 200:
+        assert "/health" in response.json()["paths"]
+
+
 def test_unknown_route_returns_404(client: TestClient) -> None:
     """Unknown paths return a JSON 404."""
     response = client.get("/does-not-exist")
