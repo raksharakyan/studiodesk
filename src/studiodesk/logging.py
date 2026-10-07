@@ -15,6 +15,9 @@ from studiodesk.config import Settings
 
 REDACTED = "**********"
 _HANDLER_NAME = "studiodesk-json"
+# Loggers that servers configure with their own handlers; they are re-pointed at the root
+# JSON handler so their output is redacted too.
+_SERVER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 _STANDARD_ATTRS = frozenset(
     logging.LogRecord("", 0, "", 0, "", None, None).__dict__.keys() | {"message", "asctime"}
 )
@@ -102,7 +105,9 @@ def _secret_values(settings: Settings) -> list[str]:
 def configure_logging(settings: Settings) -> None:
     """Install a JSON stdout handler on the root logger at `settings.log_level`.
 
-    Idempotent: calling it again replaces the previously installed handler.
+    uvicorn's loggers are routed through the same handler, so server and access logs are
+    JSON and redacted as well. Idempotent: calling it again replaces the previously installed
+    handler.
     """
     root = logging.getLogger()
     for existing in list(root.handlers):
@@ -115,3 +120,12 @@ def configure_logging(settings: Settings) -> None:
     handler.addFilter(SecretRedactingFilter(secrets))
     root.addHandler(handler)
     root.setLevel(settings.log_level)
+    _route_server_loggers_to_root()
+
+
+def _route_server_loggers_to_root() -> None:
+    """Drop uvicorn's own handlers so its records propagate to the redacting root handler."""
+    for name in _SERVER_LOGGERS:
+        server_logger = logging.getLogger(name)
+        server_logger.handlers.clear()
+        server_logger.propagate = True
