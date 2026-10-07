@@ -80,7 +80,7 @@ def _declared_length(scope: Scope) -> int | None:
     for name, value in scope.get("headers", []):
         if name == b"content-length":
             text = value.decode("latin-1").strip()
-            if not text.isdigit():
+            if not (text.isascii() and text.isdigit()):
                 return -1
             return int(text)
     return None
