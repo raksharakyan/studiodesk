@@ -60,3 +60,18 @@ jobs:
 
       - name: Dependency audit
         run: uv run pip-audit
+
+      - name: Audit public torch version
+        # pip-audit skips local versions such as 2.14.1+cpu (not on PyPI), so audit the
+        # matching public release of every locked torch version instead.
+        run: |
+          set -euo pipefail
+          versions=$(uv export --frozen --no-hashes --no-dev --no-emit-project \
+            | sed -nE 's/^torch==([0-9][^ ;+]*).*/\1/p' | sort -u)
+          if [ -z "$versions" ]; then
+            echo "torch not found in uv export" >&2
+            exit 1
+          fi
+          printf 'torch==%s\n' $versions > "$RUNNER_TEMP/torch-public.txt"
+          cat "$RUNNER_TEMP/torch-public.txt"
+          uv run pip-audit -r "$RUNNER_TEMP/torch-public.txt" --no-deps --disable-pip
