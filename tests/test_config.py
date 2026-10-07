@@ -25,7 +25,13 @@ ALL_ENV_VARS = (
     "QDRANT_URL",
     "QDRANT_API_KEY",
     "QDRANT_COLLECTION",
+    "QDRANT_TIMEOUT_S",
+    "QDRANT_UPSERT_BATCH_SIZE",
+    "QDRANT_LOCAL_PATH",
     "EMBEDDING_MODEL",
+    "EMBEDDING_BATCH_SIZE",
+    "SEARCH_RATE_LIMIT",
+    "TRUSTED_PROXY_IPS",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "SLACK_WEBHOOK_URL",
@@ -292,11 +298,11 @@ def test_m2_defaults() -> None:
     assert len(s.embedding_model_revision) == 40
 
 
-# --- pending validators (xfail until dev-agent lands them) -------------------------------
+# --- slack_webhook_url host and prod-requires-qdrant_url validators ----------------------
 
 
 def test_slack_webhook_on_hooks_slack_com_accepted() -> None:
-    """Valid webhook URLs are accepted today and must stay accepted once the validator lands."""
+    """Valid https://hooks.slack.com webhook URLs pass the host validator."""
     url = "https://hooks.slack.com/services/T000/B000/fakewebhooktoken"
     s = Settings(_env_file=None, slack_webhook_url=url)  # type: ignore[arg-type]
 
@@ -332,3 +338,71 @@ def test_prod_with_qdrant_url_accepted() -> None:
     s = Settings(_env_file=None, app_env="prod", qdrant_url="https://abc.cloud.qdrant.io")
 
     assert s.app_env == "prod"
+
+
+# --- qdrant_url: no userinfo, query or fragment ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pw@abc.cloud.qdrant.io",
+        "https://user@abc.cloud.qdrant.io",
+        "https://@abc.cloud.qdrant.io",
+        "http://user:pw@localhost:6333",
+        "https://abc.cloud.qdrant.io?q=1",
+        "https://abc.cloud.qdrant.io/?api-key=zz",
+        "https://abc.cloud.qdrant.io?",
+        "https://abc.cloud.qdrant.io#frag",
+        "https://abc.cloud.qdrant.io/path#",
+        "https://abc.cloud.qdrant.io:6333/#",
+    ],
+)
+def test_qdrant_url_rejects_userinfo_query_fragment(url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, qdrant_url=url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://abc.cloud.qdrant.io:6333",
+        "https://abc.cloud.qdrant.io/prefix/path",
+        "https://abc.cloud.qdrant.io:443/qdrant/",
+        "http://localhost:6333/base",
+    ],
+)
+def test_qdrant_url_accepts_port_and_path(url: str) -> None:
+    assert Settings(_env_file=None, qdrant_url=url).qdrant_url == url
+
+
+@pytest.mark.parametrize(
+    ("url", "fragments"),
+    [
+        ("https://alice:hunter2@xyzhost.example", ["alice", "hunter2", "xyzhost"]),
+        ("https://xyzhost.example/p?apikey=topsecret", ["xyzhost", "apikey", "topsecret"]),
+        ("https://xyzhost.example#tok3n", ["xyzhost", "tok3n"]),
+        ("http://xyzhost.example:6333/seg", ["xyzhost", "6333", "/seg"]),
+    ],
+)
+def test_qdrant_url_error_contains_no_part_of_url(url: str, fragments: list[str]) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, qdrant_url=url)
+
+    # str/repr are what tracebacks and logs show; errors(include_input=False) is what the CLI
+    # prints. (`.json()` / `.errors()` with defaults still carry `input` by pydantic design.)
+    safe_errors = excinfo.value.errors(include_input=False, include_url=False, include_context=True)
+    rendered = " ".join([str(excinfo.value), repr(excinfo.value), str(safe_errors)])
+    for fragment in fragments:
+        assert fragment not in rendered
+
+
+def test_slack_error_contains_no_part_of_url() -> None:
+    url = "https://evil-hostname.example/services/T9/B9/tok3nvalue"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, slack_webhook_url=url)  # type: ignore[arg-type]
+
+    safe_errors = excinfo.value.errors(include_input=False, include_url=False)
+    rendered = f"{excinfo.value} {excinfo.value!r} {safe_errors}"
+    assert "tok3nvalue" not in rendered
+    assert "evil-hostname" not in rendered

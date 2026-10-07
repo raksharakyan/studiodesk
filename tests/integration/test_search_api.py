@@ -300,3 +300,26 @@ def test_lifespan_builds_local_store_when_not_injected(fake_embedder: Embedder) 
         assert isinstance(app.state.store, QdrantStore)
         assert app.state.embedder is fake_embedder
         assert c.post("/search", json={"query": "x"}).json() == GENERIC_503
+
+
+def test_lifespan_store_uses_configured_upsert_batch_size(
+    fake_embedder: Embedder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import studiodesk.main as main_module
+
+    created: list[dict[str, Any]] = []
+
+    class RecordingStore(QdrantStore):
+        def __init__(self, client: Any, collection: str, **kwargs: Any) -> None:
+            created.append(kwargs)
+            super().__init__(client, collection, **kwargs)
+
+    monkeypatch.setattr(main_module, "QdrantStore", RecordingStore)
+    settings = Settings(
+        _env_file=None, app_env="test", qdrant_local_path=":memory:", qdrant_upsert_batch_size=7
+    )
+
+    with TestClient(create_app(settings, embedder=fake_embedder)):
+        pass
+
+    assert created == [{"upsert_batch_size": 7}]

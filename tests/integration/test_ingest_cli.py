@@ -186,5 +186,66 @@ def test_main_store_error_exits_1(
     code = script.main(["--data-dir", str(data_dir)])
 
     assert code == 1
-    assert "qdrant ensure_collection failed: ConnectionError" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert (
+        err.strip() == "error: VectorStoreError: qdrant ensure_collection failed: ConnectionError"
+    )
     assert _BrokenClient.closed is True
+
+
+def test_main_store_error_never_prints_cause_details(
+    script: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_embedder: Embedder,
+    data_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leaky = "https://admin:qk-SECRET@cluster.internal.example:6333"
+
+    class _LeakyClient:
+        def collection_exists(self, name: str) -> bool:
+            raise ConnectionError(f"cannot reach {leaky}")
+
+        def close(self) -> None:
+            pass
+
+    _patch_collaborators(monkeypatch, script, fake_embedder, _LeakyClient())
+
+    assert script.main(["--data-dir", str(data_dir)]) == 1
+
+    captured = capsys.readouterr()
+    for fragment in ("qk-SECRET", "admin", "cluster.internal"):
+        assert fragment not in captured.err + captured.out
+
+
+class _CountingClient:
+    """Wraps an in-memory client and records the size of every upsert request."""
+
+    def __init__(self) -> None:
+        self._inner = QdrantClient(location=":memory:")
+        self.upserts: list[int] = []
+
+    def upsert(self, collection_name: str, points: Any, **kwargs: Any) -> Any:
+        self.upserts.append(len(points))
+        return self._inner.upsert(collection_name, points=points, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_main_uses_configured_upsert_batch_size(
+    script: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_embedder: Embedder,
+    data_dir: Path,
+    dataset: Dataset,
+) -> None:
+    monkeypatch.setenv("QDRANT_UPSERT_BATCH_SIZE", "50")
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "1024")  # one embed batch -> one store.upsert
+    client = _CountingClient()
+    _patch_collaborators(monkeypatch, script, fake_embedder, client)
+
+    assert script.main(["--data-dir", str(data_dir)]) == 0
+
+    total = len(chunk_dataset(dataset))
+    assert client.upserts == [50] * (total // 50) + ([total % 50] if total % 50 else [])
