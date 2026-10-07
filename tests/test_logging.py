@@ -178,7 +178,6 @@ def test_uvicorn_loggers_routed_through_redacting_handler(
     assert _lines(out)[-1]["logger"] == "uvicorn.error"
 
 
-@pytest.mark.xfail(strict=True, reason="httpx logger level pending")
 @pytest.mark.parametrize("level", ["DEBUG", "INFO"])
 def test_httpx_logger_quietened(level: str) -> None:
     """httpx logs full request URLs at INFO; configure_logging should raise it to WARNING."""

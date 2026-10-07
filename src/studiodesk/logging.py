@@ -18,6 +18,8 @@ _HANDLER_NAME = "studiodesk-json"
 # Loggers that servers configure with their own handlers; they are re-pointed at the root
 # JSON handler so their output is redacted too.
 _SERVER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+# HTTP client loggers emit every request URL at INFO/DEBUG; keep them at WARNING.
+_QUIET_LOGGERS = ("httpx", "httpcore")
 _STANDARD_ATTRS = frozenset(
     logging.LogRecord("", 0, "", 0, "", None, None).__dict__.keys() | {"message", "asctime"}
 )
@@ -121,6 +123,8 @@ def configure_logging(settings: Settings) -> None:
     root.addHandler(handler)
     root.setLevel(settings.log_level)
     _route_server_loggers_to_root()
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _route_server_loggers_to_root() -> None:
