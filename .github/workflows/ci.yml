@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -27,6 +29,19 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen
+
+      - name: Embedding model cache key
+        id: hf-key
+        # Model name and pinned revision come from Settings defaults (single source of truth).
+        run: |
+          key=$(uv run python -c 'from studiodesk.config import Settings; s = Settings(_env_file=None); print(f"{s.embedding_model}-{s.embedding_model_revision}".replace("/", "_"))')
+          echo "key=hf-${key}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ steps.hf-key.outputs.key }}
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -44,6 +59,4 @@ jobs:
         run: uv run python scripts/validate_dataset.py
 
       - name: Dependency audit
-        # Advisory only in M1; becomes blocking later.
-        continue-on-error: true
         run: uv run pip-audit
