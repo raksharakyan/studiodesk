@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     qdrant_collection: str = Field(
         default="studiodesk", min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_-]+$"
     )
-    qdrant_timeout_s: int = Field(default=10, gt=0, le=300)
+    qdrant_timeout_s: int = Field(default=30, gt=0, le=300)
+    # Points per upsert request; small batches keep each request under the client timeout.
+    qdrant_upsert_batch_size: int = Field(default=32, gt=0, le=1024)
     # Used only when qdrant_url is unset: an embedded on-disk store, or ":memory:".
     qdrant_local_path: str = Field(default=".qdrant_data", min_length=1, max_length=1024)
     embedding_model: str = Field(

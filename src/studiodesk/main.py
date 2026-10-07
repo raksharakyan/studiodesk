@@ -40,7 +40,11 @@ def _make_lifespan(
         owned_client = None
         if store is None:
             owned_client = build_qdrant_client(settings)
-            app.state.store = QdrantStore(owned_client, settings.qdrant_collection)
+            app.state.store = QdrantStore(
+                owned_client,
+                settings.qdrant_collection,
+                upsert_batch_size=settings.qdrant_upsert_batch_size,
+            )
         else:
             app.state.store = store
         try:

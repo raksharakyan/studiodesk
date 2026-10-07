@@ -73,12 +73,16 @@ def main(argv: list[str] | None = None) -> int:
         report = ingest(
             dataset,
             embedder,
-            QdrantStore(client, settings.qdrant_collection),
+            QdrantStore(
+                client,
+                settings.qdrant_collection,
+                upsert_batch_size=settings.qdrant_upsert_batch_size,
+            ),
             settings.embedding_batch_size,
             recreate=args.recreate,
         )
     except VectorStoreError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
         client.close()

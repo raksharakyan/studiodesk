@@ -3,16 +3,21 @@
 `QdrantStore` receives its `QdrantClient` from the caller, so tests can pass an in-memory
 client (`QdrantClient(":memory:")`). Every client failure is re-raised as
 `VectorStoreError` so callers can map it to a generic error without leaking details.
+Upserts are sent in small batches and retried with exponential backoff on transient
+failures (timeouts, connection errors, 5xx); this is safe because point ids are
+deterministic, so a retried batch overwrites rather than duplicates.
 """
 
 import logging
+import time
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from studiodesk.config import Settings
 from studiodesk.models.chunks import Chunk
@@ -24,10 +29,38 @@ logger = logging.getLogger(__name__)
 IN_MEMORY_LOCATION = ":memory:"
 KEYWORD_INDEX_FIELDS = ("doc_type", "platform", "severity", "component", "version")
 INTEGER_INDEX_FIELDS = ("version_num",)
+DEFAULT_UPSERT_BATCH_SIZE = 32
+DEFAULT_UPSERT_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_S = 1.0
 
 
 class VectorStoreError(RuntimeError):
     """Any failure talking to the vector store. The message is safe to log, not to return."""
+
+
+def _error_name(exc: BaseException) -> str:
+    """Class name of `exc`, plus the wrapped cause for qdrant's ResponseHandlingException.
+
+    Only class names are used, never messages, so no URL, header or key can leak.
+    """
+    name = type(exc).__name__
+    source = getattr(exc, "source", None)
+    if isinstance(source, BaseException):
+        name = f"{name}({type(source).__name__})"
+    elif isinstance(exc, UnexpectedResponse) and exc.status_code is not None:
+        name = f"{name}({exc.status_code})"
+    return name
+
+
+def is_transient(exc: BaseException) -> bool:
+    """True for failures worth retrying: timeouts, connection errors and 5xx responses."""
+    if isinstance(exc, ResponseHandlingException | TimeoutError | ConnectionError):
+        return True
+    return (
+        isinstance(exc, UnexpectedResponse)
+        and exc.status_code is not None
+        and exc.status_code >= 500
+    )
 
 
 @contextmanager
@@ -38,7 +71,7 @@ def _store_errors(operation: str) -> Iterator[None]:
     except VectorStoreError:
         raise
     except Exception as exc:
-        raise VectorStoreError(f"qdrant {operation} failed: {type(exc).__name__}") from exc
+        raise VectorStoreError(f"qdrant {operation} failed: {_error_name(exc)}") from exc
 
 
 def build_qdrant_client(settings: Settings) -> QdrantClient:
@@ -103,10 +136,34 @@ class ScoredChunk(BaseModel):
 class QdrantStore:
     """Stores chunks as Qdrant points (cosine distance) and searches them with filters."""
 
-    def __init__(self, client: QdrantClient, collection: str) -> None:
-        """Use `client` for all calls against `collection`. The caller owns the client."""
+    def __init__(
+        self,
+        client: QdrantClient,
+        collection: str,
+        *,
+        upsert_batch_size: int = DEFAULT_UPSERT_BATCH_SIZE,
+        upsert_attempts: int = DEFAULT_UPSERT_ATTEMPTS,
+        retry_backoff_s: float = DEFAULT_RETRY_BACKOFF_S,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        """Use `client` for all calls against `collection`. The caller owns the client.
+
+        Args:
+            client: Qdrant client (cloud, local or in-memory).
+            collection: Collection name.
+            upsert_batch_size: Points sent per upsert request.
+            upsert_attempts: Tries per batch on transient errors (1 = no retry).
+            retry_backoff_s: Delay before the first retry; doubles on each further retry.
+            sleep: Sleep function (injectable for tests).
+        """
+        if upsert_batch_size <= 0 or upsert_attempts <= 0 or retry_backoff_s < 0:
+            raise ValueError("upsert batch size and attempts must be positive, backoff >= 0")
         self._client = client
         self.collection = collection
+        self._upsert_batch_size = upsert_batch_size
+        self._upsert_attempts = upsert_attempts
+        self._retry_backoff_s = retry_backoff_s
+        self._sleep = sleep
 
     def ensure_collection(self, dim: int, *, recreate: bool = False) -> None:
         """Create the collection and payload indexes if missing (or drop it first).
@@ -156,9 +213,12 @@ class QdrantStore:
     def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None:
         """Insert or overwrite one point per chunk; ids are deterministic per chunk.
 
+        Points go out in batches of `upsert_batch_size`; each batch is retried up to
+        `upsert_attempts` times on transient errors.
+
         Raises:
             ValueError: if `chunks` and `vectors` differ in length.
-            VectorStoreError: on client errors.
+            VectorStoreError: on client errors, or when retries are exhausted.
         """
         if len(chunks) != len(vectors):
             raise ValueError("chunks and vectors must have the same length")
@@ -170,8 +230,25 @@ class QdrantStore:
             )
             for chunk, vector in zip(chunks, vectors, strict=True)
         ]
+        for start in range(0, len(points), self._upsert_batch_size):
+            self._upsert_batch(points[start : start + self._upsert_batch_size])
+
+    def _upsert_batch(self, points: list[qm.PointStruct]) -> None:
+        """Upsert one batch, retrying transient failures with exponential backoff."""
         with _store_errors("upsert"):
-            self._client.upsert(self.collection, points=points, wait=True)
+            for attempt in range(1, self._upsert_attempts + 1):
+                try:
+                    self._client.upsert(self.collection, points=points, wait=True)
+                    return
+                except Exception as exc:
+                    if attempt == self._upsert_attempts or not is_transient(exc):
+                        raise
+                    delay = self._retry_backoff_s * 2 ** (attempt - 1)
+                    logger.warning(
+                        "qdrant upsert failed, retrying",
+                        extra={"attempt": attempt, "error": _error_name(exc), "delay_s": delay},
+                    )
+                    self._sleep(delay)
 
     def search(
         self, vector: Sequence[float], filters: SearchFilters | None, top_k: int
