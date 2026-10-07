@@ -1,4 +1,6 @@
-"""Pydantic models for the documents StudioDesk ingests: bug reports, crash logs, patch notes.
+"""Pydantic models for the documents StudioDesk ingests.
+
+Bug reports, crash logs, patch notes and markdown support docs (FAQ, troubleshooting, ...).
 
 All models forbid unknown fields and bound string lengths, because dataset records and
 user submissions are untrusted input.
@@ -14,6 +16,11 @@ SEMVER_PATTERN = r"^\d+\.\d+\.\d+$"
 BUG_ID_PATTERN = r"^BUG-\d{4}$"
 CRASH_ID_PATTERN = r"^CRASH-\d{4}$"
 PATCH_ID_PATTERN = r"^PATCH-\d+\.\d+\.\d+$"
+DOC_ID_PATTERN = r"^DOC-[a-z0-9]+(?:-[a-z0-9]+)*$"
+DOC_SOURCE_PATTERN = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*\.md$"
+
+# version_to_int packs MAJOR.MINOR.PATCH into one integer; each part must stay below this.
+VERSION_PART_LIMIT = 100
 
 Version = Annotated[str, Field(pattern=SEMVER_PATTERN, max_length=32)]
 BugId = Annotated[str, Field(pattern=BUG_ID_PATTERN)]
@@ -61,6 +68,7 @@ class DocType(StrEnum):
     BUG_REPORT = "bug_report"
     CRASH_LOG = "crash_log"
     PATCH_NOTE = "patch_note"
+    DOC = "doc"
 
 
 class _Document(BaseModel):
@@ -132,7 +140,36 @@ class PatchNote(_Document):
         return self
 
 
+class Doc(_Document):
+    """A markdown support document (player FAQ, troubleshooting guide, ...).
+
+    `body` is the full markdown text; it is untrusted data and is never interpreted.
+    """
+
+    id: str = Field(pattern=DOC_ID_PATTERN, max_length=80)
+    type: Literal[DocType.DOC] = DocType.DOC
+    title: Title
+    source: str = Field(pattern=DOC_SOURCE_PATTERN, max_length=80)
+    body: str = Field(min_length=1, max_length=50_000)
+    platforms: list[Platform] = Field(default_factory=lambda: list(Platform), min_length=1)
+
+
 def parse_version(version: str) -> tuple[int, int, int]:
     """Convert a `MAJOR.MINOR.PATCH` string into a comparable tuple."""
     major, minor, patch = (int(part) for part in version.split("."))
     return major, minor, patch
+
+
+def version_to_int(version: str) -> int:
+    """Pack a `MAJOR.MINOR.PATCH` string into `major*10000 + minor*100 + patch`.
+
+    The result orders exactly like `parse_version`, so it can back numeric range filters.
+
+    Raises:
+        ValueError: if the string is not semver or any part is >= `VERSION_PART_LIMIT`
+            (which would break the ordering).
+    """
+    major, minor, patch = parse_version(version)
+    if any(part >= VERSION_PART_LIMIT for part in (major, minor, patch)):
+        raise ValueError(f"version parts must be < {VERSION_PART_LIMIT}: {version!r}")
+    return (major * VERSION_PART_LIMIT + minor) * VERSION_PART_LIMIT + patch
