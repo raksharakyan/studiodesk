@@ -227,11 +227,6 @@ def test_long_doc_section_split_into_overlapping_windows() -> None:
         assert prev.text.split()[-1] in nxt.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="window_text starts each window at end-overlap without snapping, so windows "
-    "after the first begin mid-word (e.g. 'rd0116'); reported to dev-agent",
-)
 def test_windows_do_not_start_mid_word() -> None:
     words = " ".join(f"word{i:04d}" for i in range(600))
     vocab = set(words.split())

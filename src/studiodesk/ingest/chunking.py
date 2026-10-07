@@ -142,7 +142,8 @@ def split_markdown_sections(markdown: str) -> list[tuple[str | None, str]]:
 def window_text(text: str, size: int, overlap: int) -> list[str]:
     """Split `text` into windows of at most `size` chars, consecutive ones sharing `overlap`.
 
-    Window ends snap back to the last whitespace when possible so words are not cut.
+    Window ends snap back to the last whitespace, and later window starts snap forward to
+    the next word, when possible, so words are not cut.
     Returns `[text]` when it already fits, and never returns empty windows.
 
     Raises:
@@ -165,7 +166,21 @@ def window_text(text: str, size: int, overlap: int) -> list[str]:
             windows.append(window)
         if end >= len(text):
             return windows
-        start = end - overlap
+        start = _snap_start(text, end - overlap, end)
+
+
+def _snap_start(text: str, start: int, end: int) -> int:
+    """Move a window start that falls mid-word forward to the next word, staying < `end`.
+
+    `start` is returned unchanged when it is already on a word boundary or when there is no
+    whitespace in `[start, end - 1)` (hard cut). The result is always in `[start, end)`.
+    """
+    if start == 0 or text[start - 1].isspace() or text[start].isspace():
+        return start
+    for index in range(start, end - 1):
+        if text[index].isspace():
+            return index + 1
+    return start
 
 
 def chunk_doc(
