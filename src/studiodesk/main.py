@@ -94,7 +94,7 @@ def create_app(
     if settings is not None:
         app.dependency_overrides[get_settings] = lambda: settings
 
-    limiter = build_limiter()
+    limiter = build_limiter(resolved.trusted_proxy_ips)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)

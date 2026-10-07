@@ -1,10 +1,10 @@
 """Application settings loaded from environment variables and an optional `.env` file."""
 
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from studiodesk import __version__
 
@@ -64,6 +64,12 @@ class Settings(BaseSettings):
 
     # Search API
     search_rate_limit: str = Field(default="30/minute", pattern=RATE_LIMIT_PATTERN)
+    # Reverse proxies (IPs or CIDRs) whose X-Forwarded-For entries are believed when
+    # resolving the client IP for rate limiting. Empty = trust no proxy, use the peer IP.
+    # From the environment: comma-separated, e.g. TRUSTED_PROXY_IPS=10.0.0.0/8,192.0.2.7
+    trusted_proxy_ips: Annotated[list[IPvAnyNetwork], NoDecode] = Field(
+        default_factory=list, max_length=64
+    )
 
     # GitHub Issues
     github_token: SecretStr | None = None
@@ -81,6 +87,14 @@ class Settings(BaseSettings):
     def _normalise_log_level(cls, value: object) -> object:
         """Accept log levels in any case (e.g. `info`)."""
         return value.upper() if isinstance(value, str) else value
+
+    @field_validator("trusted_proxy_ips", mode="before")
+    @classmethod
+    def _split_proxy_list(cls, value: object) -> object:
+        """Accept a comma-separated string (env var) as well as a list."""
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @model_validator(mode="after")
     def _prod_requires_qdrant_url(self) -> "Settings":
