@@ -8,6 +8,10 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
+    "qdrant-client>=1.19.1",
+    "sentence-transformers>=6.1.0",
+    "slowapi>=0.1.10",
+    "torch>=2.14.1",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -52,3 +56,12 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
 ]
+
+# Linux (CI, Docker) installs CPU-only torch wheels; macOS/Windows use PyPI.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
