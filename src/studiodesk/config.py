@@ -130,12 +130,16 @@ class Settings(BaseSettings):
     @field_validator("qdrant_url")
     @classmethod
     def _require_https_qdrant_url(cls, value: str | None) -> str | None:
-        """Require an https URL, except for a Qdrant running on localhost."""
+        """Require an https URL (http only for localhost) without userinfo, query or fragment."""
         if value is None:
             return None
         parts = urlsplit(value)
         if not parts.hostname:
             raise ValueError("qdrant_url must be an absolute URL with a host")
+        if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+            raise ValueError("qdrant_url must not contain credentials; use QDRANT_API_KEY")
+        if parts.query or parts.fragment or "?" in value or "#" in value:
+            raise ValueError("qdrant_url must not contain a query string or fragment")
         if parts.scheme == "https":
             return value
         if parts.scheme == "http" and parts.hostname in LOCAL_HOSTS:
