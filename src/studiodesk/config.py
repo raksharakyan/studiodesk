@@ -3,7 +3,7 @@
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from studiodesk import __version__
@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     def _normalise_log_level(cls, value: object) -> object:
         """Accept log levels in any case (e.g. `info`)."""
         return value.upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _prod_requires_qdrant_url(self) -> "Settings":
+        """In prod, refuse to start without a remote Qdrant (no embedded local store)."""
+        if self.app_env == "prod" and not self.qdrant_url:
+            raise ValueError("qdrant_url is required when app_env is prod")
+        return self
 
     @field_validator("slack_webhook_url")
     @classmethod

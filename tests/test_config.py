@@ -69,6 +69,7 @@ def test_all_external_keys_optional() -> None:
 def test_loads_from_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """Values come from environment variables (case-insensitive names)."""
     monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("QDRANT_URL", "https://example.cloud.qdrant.io")
     monkeypatch.setenv("LLM_MODEL", "claude-test")
     monkeypatch.setenv("QDRANT_COLLECTION", "bugs_v2")
     monkeypatch.setenv("github_repo", "starfall/outpost")
@@ -322,7 +323,6 @@ def test_slack_webhook_rejects_other_hosts_http_and_lookalikes(url: str) -> None
         Settings(_env_file=None, slack_webhook_url=url)  # type: ignore[arg-type]
 
 
-@pytest.mark.xfail(strict=True, reason="prod requires qdrant_url: validator pending")
 def test_prod_without_qdrant_url_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, app_env="prod")

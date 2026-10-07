@@ -21,7 +21,12 @@ def test_health_returns_ok_with_injected_settings(client: TestClient) -> None:
 @pytest.mark.parametrize("env", ["dev", "test", "prod"])
 def test_health_reports_each_env(env: str) -> None:
     """The env field mirrors whichever app_env the app was built with."""
-    settings = Settings(_env_file=None, app_env=env, app_version="1.2.3")  # type: ignore[arg-type]
+    settings = Settings(
+        _env_file=None,
+        app_env=env,  # type: ignore[arg-type]
+        app_version="1.2.3",
+        qdrant_url="https://example.cloud.qdrant.io",
+    )
     response = TestClient(create_app(settings)).get("/health")
 
     assert response.status_code == 200
@@ -65,7 +70,9 @@ def test_docs_available_in_dev() -> None:
 
 def test_docs_disabled_in_prod() -> None:
     """Interactive docs are not served in prod."""
-    app = create_app(Settings(_env_file=None, app_env="prod"))
+    app = create_app(
+        Settings(_env_file=None, app_env="prod", qdrant_url="https://example.cloud.qdrant.io")
+    )
     client = TestClient(app)
 
     assert client.get("/docs").status_code == 404
@@ -75,7 +82,13 @@ def test_docs_disabled_in_prod() -> None:
 @pytest.mark.parametrize(("env", "expected"), [("dev", 200), ("test", 200), ("prod", 404)])
 def test_openapi_schema_only_outside_prod(env: str, expected: int) -> None:
     """The OpenAPI schema is served in dev/test and hidden in prod."""
-    app = create_app(Settings(_env_file=None, app_env=env))  # type: ignore[arg-type]
+    app = create_app(
+        Settings(
+            _env_file=None,
+            app_env=env,  # type: ignore[arg-type]
+            qdrant_url="https://example.cloud.qdrant.io",
+        )
+    )
     response = TestClient(app).get("/openapi.json")
 
     assert response.status_code == expected
