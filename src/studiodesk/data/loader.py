@@ -1,7 +1,8 @@
 """Load and validate the synthetic Starfall Outpost dataset.
 
 The dataset lives in a directory containing `bug_reports.json`, `crash_logs.json` and
-`patch_notes.json`, each a JSON array of documents.
+`patch_notes.json` (each a JSON array of documents) and a `docs/` directory of markdown
+support documents whose first line is a `# Title` heading.
 """
 
 from collections import Counter
@@ -9,11 +10,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from studiodesk.models.documents import BugReport, CrashLog, PatchNote, parse_version
+from studiodesk.models.documents import BugReport, CrashLog, Doc, PatchNote, parse_version
 
 BUG_REPORTS_FILE = "bug_reports.json"
 CRASH_LOGS_FILE = "crash_logs.json"
 PATCH_NOTES_FILE = "patch_notes.json"
+DOCS_DIR = "docs"
+DOC_SUFFIX = ".md"
 
 _BUGS = TypeAdapter(list[BugReport])
 _CRASHES = TypeAdapter(list[CrashLog])
@@ -28,12 +31,14 @@ class Dataset(BaseModel):
     bug_reports: list[BugReport]
     crash_logs: list[CrashLog]
     patch_notes: list[PatchNote]
+    docs: list[Doc] = Field(default_factory=list)
 
 
 class ValidationReport(BaseModel):
     """Result of `validate_dataset`: per-type counts and any integrity errors."""
 
     counts: dict[str, int] = Field(default_factory=dict)
+    doc_count: int = 0
     severity_counts: dict[str, int] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
 
@@ -58,17 +63,49 @@ def load_patch_notes(path: Path) -> list[PatchNote]:
     return _PATCHES.validate_json(path.read_bytes())
 
 
-def load_dataset(data_dir: Path) -> Dataset:
-    """Load all three document files from `data_dir`.
+def load_doc(path: Path) -> Doc:
+    """Parse one markdown doc; its id derives from the file name, its title from the H1.
 
     Raises:
-        OSError: if a file is missing or unreadable.
+        OSError / UnicodeDecodeError: if the file is unreadable or not UTF-8.
+        pydantic.ValidationError: if the name, title or body violate the `Doc` schema
+            (a file without a leading `# Title` line fails on the empty title).
+    """
+    body = path.read_text(encoding="utf-8")
+    first_line = body.lstrip().split("\n", 1)[0]
+    title = first_line[2:].strip() if first_line.startswith("# ") else ""
+    return Doc(
+        id=f"DOC-{path.stem.replace('_', '-')}",
+        title=title,
+        source=path.name,
+        body=body,
+    )
+
+
+def load_docs(docs_dir: Path) -> list[Doc]:
+    """Parse every `*.md` file directly inside `docs_dir`, sorted by file name.
+
+    Raises:
+        OSError: if `docs_dir` is missing or a file is unreadable.
+    """
+    if not docs_dir.is_dir():
+        raise FileNotFoundError(f"docs directory not found: {docs_dir}")
+    return [load_doc(path) for path in sorted(docs_dir.glob(f"*{DOC_SUFFIX}"))]
+
+
+def load_dataset(data_dir: Path) -> Dataset:
+    """Load the three document files and the `docs/` directory from `data_dir`.
+
+    Raises:
+        OSError: if a file or the docs directory is missing or unreadable.
+        UnicodeDecodeError: if a markdown doc is not valid UTF-8.
         pydantic.ValidationError: if any record violates its schema.
     """
     return Dataset(
         bug_reports=load_bug_reports(data_dir / BUG_REPORTS_FILE),
         crash_logs=load_crash_logs(data_dir / CRASH_LOGS_FILE),
         patch_notes=load_patch_notes(data_dir / PATCH_NOTES_FILE),
+        docs=load_docs(data_dir / DOCS_DIR),
     )
 
 
@@ -123,6 +160,7 @@ def check_integrity(dataset: Dataset) -> list[str]:
         *_duplicate_id_errors("bug_reports", [b.id for b in dataset.bug_reports]),
         *_duplicate_id_errors("crash_logs", [c.id for c in dataset.crash_logs]),
         *_duplicate_id_errors("patch_notes", [p.id for p in dataset.patch_notes]),
+        *_duplicate_id_errors("docs", [d.id for d in dataset.docs]),
         *_bug_reference_errors(dataset),
         *_crash_reference_errors(dataset),
         *_patch_reference_errors(dataset),
@@ -136,7 +174,7 @@ def validate_dataset(data_dir: Path) -> ValidationReport:
     """
     try:
         dataset = load_dataset(data_dir)
-    except (OSError, ValidationError) as exc:
+    except (OSError, UnicodeDecodeError, ValidationError) as exc:
         return ValidationReport(errors=[f"failed to load dataset: {exc}"])
 
     severities: Counter[str] = Counter(b.severity.value for b in dataset.bug_reports)
@@ -147,6 +185,7 @@ def validate_dataset(data_dir: Path) -> ValidationReport:
             "crash_logs": len(dataset.crash_logs),
             "patch_notes": len(dataset.patch_notes),
         },
+        doc_count=len(dataset.docs),
         severity_counts=dict(sorted(severities.items())),
         errors=check_integrity(dataset),
     )

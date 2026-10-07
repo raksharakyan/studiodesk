@@ -19,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Dataset: {args.data_dir}")
     for kind, count in report.counts.items():
         print(f"  {kind:<12} {count}")
+    if report.counts:
+        print(f"  {'docs':<12} {report.doc_count}")
     if report.severity_counts:
         print("Severity (bug reports + crash logs):")
         for severity, count in report.severity_counts.items():
