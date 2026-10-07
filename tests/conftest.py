@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from qdrant_client import QdrantClient
 
 from studiodesk.config import Settings
+from studiodesk.data.loader import Dataset, load_dataset
+from studiodesk.ingest.pipeline import ingest
 from studiodesk.main import create_app
 from studiodesk.vectorstore import QdrantStore
 
@@ -40,6 +42,13 @@ class FakeEmbedder:
             vector[int.from_bytes(digest) % self._dim] += 1.0
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers (pyproject.toml is owned by dev-agent)."""
+    config.addinivalue_line(
+        "markers", "slow: loads the real embedding model; deselect with -m 'not slow'"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -97,3 +106,18 @@ def data_copy(tmp_path: Path) -> Path:
     target = tmp_path / "synthetic"
     shutil.copytree(DATA_DIR, target)
     return target
+
+
+@pytest.fixture(scope="session")
+def dataset() -> Dataset:
+    """The real synthetic dataset, parsed once per session (models are frozen)."""
+    return load_dataset(DATA_DIR)
+
+
+@pytest.fixture
+def ingested_store(
+    store: QdrantStore, fake_embedder: FakeEmbedder, dataset: Dataset
+) -> QdrantStore:
+    """In-memory store with the whole dataset ingested via the fake embedder."""
+    ingest(dataset, fake_embedder, store, batch_size=32)
+    return store

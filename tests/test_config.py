@@ -113,10 +113,20 @@ def test_settings_are_frozen() -> None:
         s.app_env = "prod"  # type: ignore[misc]
 
 
+# Values are valid for each field's validators (Slack URLs must be hooks.slack.com).
+SECRET_SAMPLES = {
+    "anthropic_api_key": "super-secret-anthropic_api_key-value",
+    "qdrant_api_key": "super-secret-qdrant_api_key-value",
+    "github_token": "super-secret-github_token-value",
+    "slack_webhook_url": "https://hooks.slack.com/services/T000/B000/fakesupersecretvalue",
+    "elevenlabs_api_key": "super-secret-elevenlabs_api_key-value",
+}
+
+
 @pytest.mark.parametrize("field", SECRET_FIELDS)
 def test_secret_values_never_revealed(field: str) -> None:
     """SecretStr fields are masked in repr, str and JSON dumps."""
-    secret = f"super-secret-{field}-value"
+    secret = SECRET_SAMPLES[field]
     s = Settings(_env_file=None, **{field: secret})  # type: ignore[arg-type]
 
     value = getattr(s, field)
@@ -206,3 +216,122 @@ def test_unsupported_llm_provider_rejected() -> None:
     """Only the anthropic provider is supported in M1."""
     with pytest.raises(ValidationError):
         Settings(_env_file=None, llm_provider="openai")  # type: ignore[arg-type]
+
+
+# --- qdrant_url (M2) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://abc-123.eu-central.aws.cloud.qdrant.io",
+        "https://abc.cloud.qdrant.io:6333",
+        "http://localhost:6333",
+        "http://127.0.0.1:6333",
+        "http://[::1]:6333",
+    ],
+)
+def test_qdrant_url_accepts_https_or_local_http(url: str) -> None:
+    assert Settings(_env_file=None, qdrant_url=url).qdrant_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://abc.cloud.qdrant.io",
+        "http://localhost.evil.io:6333",
+        "ftp://abc.cloud.qdrant.io",
+        "abc.cloud.qdrant.io",
+        "https://",
+        "localhost:6333",
+        "https://" + "a" * 2050,
+    ],
+)
+def test_qdrant_url_rejects_insecure_or_malformed(url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, qdrant_url=url)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_qdrant_url_means_unset(value: str) -> None:
+    assert Settings(_env_file=None, qdrant_url=value).qdrant_url is None
+
+
+def test_qdrant_url_error_does_not_echo_credentials() -> None:
+    """The validation message itself must not repeat a URL that may embed credentials."""
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, qdrant_url="http://user:pa55word@remote.example")
+
+    errors = excinfo.value.errors(include_input=False, include_url=False)
+    assert "pa55word" not in str(errors)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("embedding_model_revision", "main"),
+        ("embedding_model_revision", "1110a243"),
+        ("embedding_batch_size", 0),
+        ("embedding_batch_size", 1025),
+        ("qdrant_timeout_s", 0),
+        ("embedding_device", "tpu"),
+    ],
+)
+def test_m2_settings_bounds(field: str, value: object) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})  # type: ignore[arg-type]
+
+
+def test_m2_defaults() -> None:
+    s = Settings(_env_file=None)
+
+    assert s.search_rate_limit == "30/minute"
+    assert s.embedding_batch_size == 64
+    assert s.embedding_device == "cpu"
+    assert len(s.embedding_model_revision) == 40
+
+
+# --- pending validators (xfail until dev-agent lands them) -------------------------------
+
+SLACK_PENDING = pytest.mark.xfail(strict=True, reason="slack host validator pending")
+
+
+def test_slack_webhook_on_hooks_slack_com_accepted() -> None:
+    """Valid webhook URLs are accepted today and must stay accepted once the validator lands."""
+    url = "https://hooks.slack.com/services/T000/B000/fakewebhooktoken"
+    s = Settings(_env_file=None, slack_webhook_url=url)  # type: ignore[arg-type]
+
+    assert s.slack_webhook_url is not None
+    assert s.slack_webhook_url.get_secret_value() == url
+
+
+@SLACK_PENDING
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://hooks.slack.com/services/T000/B000/fake",
+        "https://hooks.slack.example/services/T000/B000/fake",
+        "https://evil.io/services/T000/B000/fake",
+        "https://hooks.slack.com.evil.io/services/T000/B000/fake",
+        "https://evil.io/hooks.slack.com/services/T000/B000/fake",
+        "https://hooks.slack.com@evil.io/services/T000/B000/fake",
+        "https://evilhooks.slack.com/services/T000/B000/fake",
+        "hooks.slack.com/services/T000/B000/fake",
+        "not a url",
+    ],
+)
+def test_slack_webhook_rejects_other_hosts_http_and_lookalikes(url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, slack_webhook_url=url)  # type: ignore[arg-type]
+
+
+@pytest.mark.xfail(strict=True, reason="prod requires qdrant_url: validator pending")
+def test_prod_without_qdrant_url_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, app_env="prod")
+
+
+def test_prod_with_qdrant_url_accepted() -> None:
+    s = Settings(_env_file=None, app_env="prod", qdrant_url="https://abc.cloud.qdrant.io")
+
+    assert s.app_env == "prod"

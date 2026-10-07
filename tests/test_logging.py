@@ -41,7 +41,7 @@ def test_every_secret_field_redacted(capsys: pytest.CaptureFixture[str]) -> None
         "anthropic_api_key": "secret-anthropic-1",
         "qdrant_api_key": "secret-qdrant-2",
         "github_token": "secret-github-3",
-        "slack_webhook_url": "https://hooks.slack.example/secret-4",
+        "slack_webhook_url": "https://hooks.slack.com/services/T000/B000/fakesecret4",
         "elevenlabs_api_key": "secret-eleven-5",
     }
     configure_logging(Settings(_env_file=None, **secrets))  # type: ignore[arg-type]
@@ -157,3 +157,35 @@ def test_secret_with_json_escaped_chars_redacted(capsys: pytest.CaptureFixture[s
     assert tricky not in out
     assert json.dumps(tricky)[1:-1] not in out
     assert _lines(out)[-1]["cred"] == REDACTED
+
+
+def test_uvicorn_loggers_routed_through_redacting_handler(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """uvicorn's own handlers are dropped so its records are JSON and redacted too."""
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).addHandler(logging.StreamHandler())
+    configure_logging(Settings(_env_file=None, anthropic_api_key=SECRET_STR))
+
+    logging.getLogger("uvicorn.error").warning("bad header %s", SECRET)
+
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        server_logger = logging.getLogger(name)
+        assert server_logger.handlers == []
+        assert server_logger.propagate is True
+    out = capsys.readouterr().out
+    assert SECRET not in out
+    assert _lines(out)[-1]["logger"] == "uvicorn.error"
+
+
+@pytest.mark.xfail(strict=True, reason="httpx logger level pending")
+@pytest.mark.parametrize("level", ["DEBUG", "INFO"])
+def test_httpx_logger_quietened(level: str) -> None:
+    """httpx logs full request URLs at INFO; configure_logging should raise it to WARNING."""
+    httpx_logger = logging.getLogger("httpx")
+    saved = httpx_logger.level
+    try:
+        configure_logging(Settings(_env_file=None, log_level=level))  # type: ignore[arg-type]
+        assert httpx_logger.getEffectiveLevel() >= logging.WARNING
+    finally:
+        httpx_logger.setLevel(saved)
