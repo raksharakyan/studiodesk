@@ -8,6 +8,7 @@ from studiodesk.api import health
 from studiodesk.api.deps import get_settings
 from studiodesk.config import Settings
 from studiodesk.logging import configure_logging
+from studiodesk.middleware import BodySizeLimitMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     if settings is not None:
         app.dependency_overrides[get_settings] = lambda: settings
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)
     app.include_router(health.router)
 
     logger.info("app created", extra={"env": resolved.app_env, "version": resolved.app_version})
