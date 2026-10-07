@@ -13,12 +13,15 @@ uv run pytest -q                          # tests
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src
 uv run python scripts/validate_dataset.py # check the synthetic dataset
+uv run python scripts/ingest.py [--recreate] # chunk, embed, upsert to Qdrant (needs QDRANT_URL; idempotent)
+uv run pytest -q -m "not slow"            # skip tests that load the real embedding model
 uvx pip-audit                             # dependency audit
 ```
 
 ## Layout
-- `src/studiodesk/`: app package (`main.py` app factory, `config.py` Settings, `api/` routers, `models/` Pydantic models)
-- `data/synthetic/`: fictional game "Starfall Outpost" dataset (bug reports, crash logs, patch notes)
+- `src/studiodesk/`: app package (`main.py` app factory, `config.py` Settings, `api/` routers, `models/` Pydantic models, `ingest/` chunking + pipeline, `embeddings.py`, `vectorstore.py`)
+- `data/synthetic/`: fictional game "Starfall Outpost" dataset (bug reports, crash logs, patch notes, `docs/` markdown)
+- Qdrant: Cloud when `QDRANT_URL` is set, otherwise embedded local mode (`.qdrant_data/`); tests always use `:memory:` with a fake embedder
 - `scripts/`: one-off CLIs (dataset validation, later ingestion)
 - `tests/`: pytest; `evals/`: eval suite (from M4)
 - `.claude/agents/`: dev-agent, qa-agent, security-agent, ui-agent
