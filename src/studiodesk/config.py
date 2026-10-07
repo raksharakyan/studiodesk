@@ -11,6 +11,7 @@ from studiodesk import __version__
 GITHUB_REPO_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+SLACK_WEBHOOK_HOST = "hooks.slack.com"
 
 
 class Settings(BaseSettings):
@@ -25,6 +26,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        # Validation errors must never echo raw inputs: they may be secrets.
+        hide_input_in_errors=True,
     )
 
     # Application
@@ -76,6 +79,24 @@ class Settings(BaseSettings):
     def _normalise_log_level(cls, value: object) -> object:
         """Accept log levels in any case (e.g. `info`)."""
         return value.upper() if isinstance(value, str) else value
+
+    @field_validator("slack_webhook_url")
+    @classmethod
+    def _require_slack_webhook_host(cls, value: SecretStr | None) -> SecretStr | None:
+        """Accept only `https://hooks.slack.com/...` (exact host, no userinfo or port)."""
+        if value is None:
+            return None
+        parts = urlsplit(value.get_secret_value())
+        if (
+            parts.scheme != "https"
+            or parts.netloc != SLACK_WEBHOOK_HOST
+            or parts.hostname != SLACK_WEBHOOK_HOST
+            or parts.username is not None
+            or parts.password is not None
+            or parts.path in ("", "/")
+        ):
+            raise ValueError(f"slack_webhook_url must be an https://{SLACK_WEBHOOK_HOST}/ URL")
+        return value
 
     @field_validator("qdrant_url", mode="before")
     @classmethod

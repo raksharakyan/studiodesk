@@ -293,8 +293,6 @@ def test_m2_defaults() -> None:
 
 # --- pending validators (xfail until dev-agent lands them) -------------------------------
 
-SLACK_PENDING = pytest.mark.xfail(strict=True, reason="slack host validator pending")
-
 
 def test_slack_webhook_on_hooks_slack_com_accepted() -> None:
     """Valid webhook URLs are accepted today and must stay accepted once the validator lands."""
@@ -305,7 +303,6 @@ def test_slack_webhook_on_hooks_slack_com_accepted() -> None:
     assert s.slack_webhook_url.get_secret_value() == url
 
 
-@SLACK_PENDING
 @pytest.mark.parametrize(
     "url",
     [
