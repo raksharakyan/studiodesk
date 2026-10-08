@@ -47,7 +47,7 @@ class ProposedAction(BaseModel):
     kind: Literal["file_issue"] = "file_issue"
     confirm_token: str
     expires_at: datetime
-    repo: str | None
+    repo: str
     preview: IssueDraft
 
 
