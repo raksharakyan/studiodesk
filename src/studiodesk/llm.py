@@ -1,0 +1,215 @@
+"""LLM access behind a small Protocol, with an Anthropic implementation.
+
+`LLMClient.structured` sends one system prompt plus one user message and returns an
+instance of the requested Pydantic schema. `AnthropicLLM` uses the official SDK's
+structured outputs: the JSON schema goes in `output_config.format` (built with the SDK's
+own `transform_schema`, as `messages.parse` does) together with `output_config.effort`.
+
+Why `beta.messages.create` and not `messages.parse`: `parse` validates the JSON inside the
+SDK's response post-parser, so a refused or truncated response would surface as a pydantic
+error before `stop_reason` could be inspected. Here `stop_reason` is checked first
+(`refusal` -> `LLMRefusal`, `max_tokens` -> `LLMTruncated`) and only then is the text
+validated against the schema. The beta path is used because it is the one that accepts
+`fallbacks="default"` with the `server-side-fallback-2026-07-01` beta: when the requested
+model declines for policy reasons the server retries on its default substitute model.
+
+No `thinking` parameter is sent (omitting it is valid for the default model, while
+`{"type": "disabled"}` and `budget_tokens` are rejected), and there is no assistant prefill.
+Prompts and model output are never logged; only model, stop reason and token counts are.
+"""
+
+import logging
+from typing import Literal, Protocol
+
+import anthropic
+from anthropic.types.anthropic_beta_param import AnthropicBetaParam
+from anthropic.types.beta import BetaMessage, BetaOutputConfigParam, BetaTextBlock
+from pydantic import BaseModel, ValidationError
+
+from studiodesk.config import Settings
+
+logger = logging.getLogger(__name__)
+
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+LLM_MAX_RETRIES = 2
+REFUSAL_FALLBACK_BETA: AnthropicBetaParam = "server-side-fallback-2026-07-01"
+_OK_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
+_TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
+
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class LLMError(RuntimeError):
+    """Base class for LLM failures. Messages are safe to log, never to return to clients."""
+
+
+class LLMUnavailable(LLMError):  # noqa: N818 (names fixed by the M3 spec)
+    """The provider could not be reached or rejected the call (rate limit, 5xx, timeout)."""
+
+
+class LLMRefusal(LLMError):  # noqa: N818 (names fixed by the M3 spec)
+    """The model declined to answer (`stop_reason == "refusal"`)."""
+
+
+class LLMTruncated(LLMError):  # noqa: N818 (names fixed by the M3 spec)
+    """The response hit the token limit before the structured output was complete."""
+
+
+class LLMInvalidOutput(LLMError):  # noqa: N818 (names fixed by the M3 spec)
+    """The response did not contain JSON matching the requested schema."""
+
+
+class LLMClient(Protocol):
+    """Anything that can turn a system prompt plus user content into a schema instance."""
+
+    def structured[SchemaT: BaseModel](
+        self, system: str, user_content: str, schema: type[SchemaT]
+    ) -> SchemaT:
+        """Return the model's answer parsed as `schema`.
+
+        Raises:
+            LLMError: any failure (a subclass says which kind).
+        """
+        ...
+
+
+class AnthropicLLM:
+    """`LLMClient` backed by the Anthropic Messages API (structured outputs)."""
+
+    def __init__(
+        self,
+        client: anthropic.Anthropic,
+        *,
+        model: str,
+        max_tokens: int,
+        effort: Effort = "medium",
+        refusal_fallback: bool = True,
+    ) -> None:
+        """Wrap an SDK client; the caller owns it (see `close`).
+
+        Args:
+            client: Configured SDK client (key, timeout and retries already set).
+            model: Model id, e.g. `claude-sonnet-5-5`.
+            max_tokens: Upper bound on generated tokens per call.
+            effort: `output_config.effort` sent with every call.
+            refusal_fallback: Send `fallbacks="default"` with the server-side fallback beta.
+        """
+        self._client = client
+        self._model = model
+        self._max_tokens = max_tokens
+        self._effort: Effort = effort
+        self._refusal_fallback = refusal_fallback
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "AnthropicLLM":
+        """Build the SDK client from settings (fixed API host, timeout, max 2 retries).
+
+        Raises:
+            LLMUnavailable: if no `anthropic_api_key` is configured.
+        """
+        if settings.anthropic_api_key is None:
+            raise LLMUnavailable("anthropic_api_key is not configured")
+        client = anthropic.Anthropic(
+            api_key=settings.anthropic_api_key.get_secret_value(),
+            base_url=ANTHROPIC_BASE_URL,
+            timeout=settings.llm_timeout_s,
+            max_retries=LLM_MAX_RETRIES,
+        )
+        return cls(
+            client,
+            model=settings.llm_model,
+            max_tokens=settings.llm_max_tokens,
+            effort=settings.llm_effort,
+            refusal_fallback=settings.llm_refusal_fallback,
+        )
+
+    def close(self) -> None:
+        """Close the underlying SDK client and its connection pool."""
+        self._client.close()
+
+    def structured[SchemaT: BaseModel](
+        self, system: str, user_content: str, schema: type[SchemaT]
+    ) -> SchemaT:
+        """Call the model once and parse its JSON output as `schema`.
+
+        Raises:
+            LLMUnavailable: on SDK errors (rate limit, status, connection, timeout).
+            LLMRefusal: if the model (and any fallback) refused.
+            LLMTruncated: if the output hit the token limit.
+            LLMInvalidOutput: if the output is not valid JSON for `schema`.
+        """
+        message = self._create(system, user_content, schema)
+        logger.info(
+            "llm call completed",
+            extra={
+                "model": message.model,
+                "stop_reason": message.stop_reason,
+                "input_tokens": message.usage.input_tokens,
+                "output_tokens": message.usage.output_tokens,
+            },
+        )
+        _check_stop_reason(message)
+        return _parse_output(message, schema)
+
+    def _create(self, system: str, user_content: str, schema: type[BaseModel]) -> BetaMessage:
+        """Send the request, mapping every SDK error to `LLMUnavailable`."""
+        output_config: BetaOutputConfigParam = {
+            "effort": self._effort,
+            "format": {"type": "json_schema", "schema": anthropic.transform_schema(schema)},
+        }
+        try:
+            if self._refusal_fallback:
+                return self._client.beta.messages.create(
+                    model=self._model,
+                    max_tokens=self._max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user_content}],
+                    output_config=output_config,
+                    fallbacks="default",
+                    betas=[REFUSAL_FALLBACK_BETA],
+                )
+            return self._client.beta.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+                output_config=output_config,
+            )
+        except (
+            anthropic.RateLimitError,
+            anthropic.APIStatusError,
+            anthropic.APITimeoutError,
+            anthropic.APIConnectionError,
+            anthropic.APIError,
+        ) as exc:
+            raise LLMUnavailable(f"anthropic call failed: {_error_name(exc)}") from exc
+
+
+def _error_name(exc: BaseException) -> str:
+    """Class name plus HTTP status (if any); never the message, which may echo the request."""
+    status = getattr(exc, "status_code", None)
+    return f"{type(exc).__name__}({status})" if isinstance(status, int) else type(exc).__name__
+
+
+def _check_stop_reason(message: BetaMessage) -> None:
+    """Raise the matching `LLMError` unless the model finished normally."""
+    reason = message.stop_reason
+    if reason == "refusal":
+        raise LLMRefusal("model refused the request")
+    if reason in _TRUNCATED_STOP_REASONS:
+        raise LLMTruncated(f"model output truncated: {reason}")
+    if reason not in _OK_STOP_REASONS:
+        raise LLMInvalidOutput(f"unexpected stop_reason: {reason}")
+
+
+def _parse_output[SchemaT: BaseModel](message: BetaMessage, schema: type[SchemaT]) -> SchemaT:
+    """Validate the concatenated text blocks as JSON for `schema`."""
+    text = "".join(block.text for block in message.content if isinstance(block, BetaTextBlock))
+    if not text.strip():
+        raise LLMInvalidOutput("model returned no text")
+    try:
+        return schema.model_validate_json(text)
+    except ValidationError as exc:
+        raise LLMInvalidOutput(
+            f"model output did not match {schema.__name__}: {exc.error_count()} errors"
+        ) from None
