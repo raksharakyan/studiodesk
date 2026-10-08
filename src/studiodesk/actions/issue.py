@@ -3,8 +3,12 @@
 The issue text comes only from the user's validated report fields, the kNN routing result
 and, for a `possible_duplicate` verdict, the ids and similarity scores of the flagged
 candidates from our own retrieval. No model text (answers, reasons) is ever included, so
-the LLM cannot put content into an outward action. `@mentions` are neutralised with a
-zero-width joiner so filing an issue never pings users or teams.
+the LLM cannot put content into an outward action.
+
+User-supplied fields go inside code fences longer than any backtick run they contain, so
+markdown, HTML comments, `#refs` and URLs render inertly. The title stays plain text with
+`@mentions` and `#N` / `owner/repo#N` references broken by a zero-width joiner, so filing
+an issue never pings anyone or cross-links other issues.
 """
 
 import re
@@ -22,6 +26,10 @@ from studiodesk.models.documents import BUG_ID_PATTERN
 
 ZERO_WIDTH_JOINER = "‍"
 _MENTION_RE = re.compile(r"@(?=[A-Za-z0-9])")
+# `#123` and `owner/repo#123` auto-link to issues; a ZWJ after `#` breaks the reference.
+_ISSUE_REF_RE = re.compile(r"#(?=\d)")
+_BACKTICK_RUN_RE = re.compile(r"`+")
+MIN_FENCE = 3
 _BUG_ID_RE = re.compile(BUG_ID_PATTERN)
 MAX_POSSIBLE_DUPLICATES = 5
 _TRUNCATED_MARK = "\n\n_(truncated)_"
@@ -31,6 +39,22 @@ FOOTER = "_Filed by StudioDesk after explicit user confirmation._"
 def neutralise_mentions(text: str) -> str:
     """Insert a zero-width joiner after every `@` that starts a mention (`@user`, `@org/x`)."""
     return _MENTION_RE.sub("@" + ZERO_WIDTH_JOINER, text)
+
+
+def neutralise_issue_refs(text: str) -> str:
+    """Insert a zero-width joiner after `#` in `#N` / `owner/repo#N` references."""
+    return _ISSUE_REF_RE.sub("#" + ZERO_WIDTH_JOINER, text)
+
+
+def fenced(text: str) -> list[str]:
+    """Wrap untrusted text in a code fence longer than any backtick run inside it.
+
+    Inside the fence, markdown, HTML (including comments), `#refs`, mentions and URLs
+    render as inert text, and the text cannot close the fence early.
+    """
+    longest = max((len(run) for run in _BACKTICK_RUN_RE.findall(text)), default=0)
+    fence = "`" * max(MIN_FENCE, longest + 1)
+    return [f"{fence}text", text, fence]
 
 
 def _routing_lines(routing: RoutingResult) -> list[str]:
@@ -82,17 +106,21 @@ def possible_duplicates_line(
 def build_issue_body(
     report: NewBugReport, routing: RoutingResult, duplicates: DuplicateCheck
 ) -> str:
-    """Render the markdown body from report fields, routing and flagged ids, capped."""
+    """Render the markdown body from report fields, routing and flagged ids, capped.
+
+    Every user-supplied field is inside its own code fence (see `fenced`); only
+    server-generated lines (headings, enums, routing, ids and scores) are markdown. If the
+    cap cuts the body inside a fence, the remainder simply stays inert code.
+    """
     possible = flagged_candidates(duplicates)
-    lines = ["## Description", report.description, ""]
+    lines = ["## Description", *fenced(report.description), ""]
     if report.steps_to_reproduce:
-        lines.append("## Steps to reproduce")
-        lines += [f"{i}. {step}" for i, step in enumerate(report.steps_to_reproduce, 1)]
-        lines.append("")
+        steps = "\n".join(f"{i}. {step}" for i, step in enumerate(report.steps_to_reproduce, 1))
+        lines += ["## Steps to reproduce", *fenced(steps), ""]
     if report.expected:
-        lines += ["## Expected", report.expected, ""]
+        lines += ["## Expected", *fenced(report.expected), ""]
     if report.actual:
-        lines += ["## Actual", report.actual, ""]
+        lines += ["## Actual", *fenced(report.actual), ""]
     lines += [
         "## Environment",
         f"- Platform: {report.platform.value}",
@@ -113,7 +141,7 @@ def build_issue_draft(
     report: NewBugReport, routing: RoutingResult, duplicates: DuplicateCheck
 ) -> IssueDraft:
     """Build the exact issue (title, body, allowlisted labels) that confirm will create."""
-    title = neutralise_mentions(report.title)[:ISSUE_TITLE_MAX_CHARS]
+    title = neutralise_issue_refs(neutralise_mentions(report.title))[:ISSUE_TITLE_MAX_CHARS]
     labels = list(routing.labels)
     if duplicates.verdict is DuplicateVerdict.POSSIBLE_DUPLICATE:
         labels.append(POSSIBLE_DUPLICATE_LABEL)

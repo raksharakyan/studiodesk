@@ -74,10 +74,10 @@ def test_body_has_report_fields_routing_and_footer() -> None:
     assert draft.title == "Photo mode camera ignores inverted Y"
     body = draft.body
     for expected in (
-        "## Description\nThe free camera ignores the inverted Y setting.",
-        "## Steps to reproduce\n1. Enable inverted Y\n2. Open photo mode",
-        "## Expected\nCamera is inverted",
-        "## Actual\nCamera is not inverted",
+        "## Description\n```text\nThe free camera ignores the inverted Y setting.\n```",
+        "## Steps to reproduce\n```text\n1. Enable inverted Y\n2. Open photo mode",
+        "## Expected\n```text\nCamera is inverted\n```",
+        "## Actual\n```text\nCamera is not inverted\n```",
         "- Platform: ps5",
         "- Version: 1.0.2",
         "- Component: ui (vote share 0.60)",
