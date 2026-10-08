@@ -157,12 +157,6 @@ def test_confidence_is_clamped(raw: float, clamped: float) -> None:
     assert result.candidates[0].confidence == clamped
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValidationError,
-    reason="DEFECT: NaN confidence from the LLM passes min/max clamping and fails "
-    "DuplicateCandidate validation (uncaught -> 500); agent/duplicates.py:131",
-)
 def test_nan_confidence_is_handled() -> None:
     judgements = DuplicateJudgements.model_validate_json(
         '{"judgements": [{"candidate_id": "BUG-0002", "is_duplicate": true, '

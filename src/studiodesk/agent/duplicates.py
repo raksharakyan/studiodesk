@@ -41,6 +41,7 @@ which still shows the candidate but keeps the issue proposal available.
 """
 
 import logging
+import math
 from collections.abc import Callable, Collection
 
 from studiodesk.agent.retrieval import Retriever
@@ -168,6 +169,11 @@ def resolve_canonical_ids(
     return resolved
 
 
+def clamp_confidence(value: float) -> float:
+    """Clamp to [0, 1]; a non-finite value (NaN, +-inf) from the model becomes 0.0."""
+    return min(max(value, 0.0), 1.0) if math.isfinite(value) else 0.0
+
+
 def merge_judgements(
     hits: list[ScoredChunk], judgements: list[CandidateJudgement]
 ) -> list[DuplicateCandidate]:
@@ -175,7 +181,8 @@ def merge_judgements(
 
     Judgements for ids that were not shortlisted are ignored; the first judgement per id
     wins; a hit without a judgement counts as "not a duplicate". Confidence is clamped to
-    [0, 1] and the reason truncated, since the schema cannot enforce either.
+    [0, 1] (non-finite -> 0.0) and the reason truncated, since the schema cannot enforce
+    either.
     """
     by_id: dict[str, CandidateJudgement] = {}
     for item in judgements:
@@ -192,7 +199,7 @@ def merge_judgements(
                 title=hit.chunk.title,
                 score=hit.score,
                 is_duplicate=judgement.is_duplicate if judgement else False,
-                confidence=min(max(judgement.confidence, 0.0), 1.0) if judgement else 0.0,
+                confidence=clamp_confidence(judgement.confidence) if judgement else 0.0,
                 reason=(judgement.reason.strip() if judgement else NO_JUDGEMENT_REASON)[
                     :REASON_MAX_CHARS
                 ],
