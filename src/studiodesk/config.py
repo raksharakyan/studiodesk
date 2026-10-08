@@ -40,6 +40,24 @@ class Settings(BaseSettings):
     llm_provider: Literal["anthropic"] = "anthropic"
     llm_model: str = Field(default="claude-sonnet-5-5", min_length=1, max_length=128)
     anthropic_api_key: SecretStr | None = None
+    # Output effort for the model (`output_config.effort`).
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    llm_max_tokens: int = Field(default=2048, gt=0, le=32_000)
+    llm_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    # Server-side retry on a substitute model when the requested model declines.
+    llm_refusal_fallback: bool = True
+
+    # Agent: answers, duplicate detection, routing
+    answer_top_k: int = Field(default=6, ge=1, le=20)
+    dup_search_k: int = Field(default=5, ge=1, le=20)
+    # Calibrated with the pinned MiniLM model; see studiodesk.agent.duplicates.
+    dup_candidate_threshold: float = Field(default=0.48, ge=0.0, le=1.0)
+    dup_auto_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    routing_k: int = Field(default=7, ge=1, le=50)
+
+    # Confirmed actions
+    action_ttl_s: int = Field(default=900, ge=30, le=86_400)
+    action_max_pending: int = Field(default=1000, ge=1, le=100_000)
 
     # Vector store / embeddings
     qdrant_url: str | None = Field(default=None, max_length=2048)
@@ -64,6 +82,9 @@ class Settings(BaseSettings):
 
     # Search API
     search_rate_limit: str = Field(default="30/minute", pattern=RATE_LIMIT_PATTERN)
+    ask_rate_limit: str = Field(default="10/minute", pattern=RATE_LIMIT_PATTERN)
+    bugs_rate_limit: str = Field(default="10/minute", pattern=RATE_LIMIT_PATTERN)
+    actions_rate_limit: str = Field(default="5/minute", pattern=RATE_LIMIT_PATTERN)
     # Reverse proxies (IPs or CIDRs) whose X-Forwarded-For entries are believed when
     # resolving the client IP for rate limiting. Empty = trust no proxy, use the peer IP.
     # From the environment: comma-separated, e.g. TRUSTED_PROXY_IPS=10.0.0.0/8,192.0.2.7
@@ -74,9 +95,11 @@ class Settings(BaseSettings):
     # GitHub Issues
     github_token: SecretStr | None = None
     github_repo: str | None = Field(default=None, pattern=GITHUB_REPO_PATTERN)
+    github_timeout_s: float = Field(default=15.0, gt=0, le=120)
 
     # Slack
     slack_webhook_url: SecretStr | None = None
+    slack_timeout_s: float = Field(default=10.0, gt=0, le=120)
 
     # ElevenLabs voice agent
     elevenlabs_api_key: SecretStr | None = None
@@ -102,6 +125,19 @@ class Settings(BaseSettings):
         if self.app_env == "prod" and not self.qdrant_url:
             raise ValueError("qdrant_url is required when app_env is prod")
         return self
+
+    @model_validator(mode="after")
+    def _ordered_dup_thresholds(self) -> "Settings":
+        """Require `dup_candidate_threshold <= dup_auto_threshold`."""
+        if self.dup_candidate_threshold > self.dup_auto_threshold:
+            raise ValueError("dup_candidate_threshold must not exceed dup_auto_threshold")
+        return self
+
+    @field_validator("anthropic_api_key", "github_token", "slack_webhook_url", mode="before")
+    @classmethod
+    def _empty_integration_value_is_unset(cls, value: object) -> object:
+        """Treat an empty integration value (e.g. `SLACK_WEBHOOK_URL=`) as not configured."""
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("slack_webhook_url")
     @classmethod
