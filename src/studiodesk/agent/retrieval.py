@@ -3,6 +3,7 @@
 from collections.abc import Collection
 
 from studiodesk.embeddings import Embedder
+from studiodesk.models.chunks import Chunk
 from studiodesk.models.documents import DocType
 from studiodesk.models.search import SearchFilters
 from studiodesk.vectorstore import QdrantStore, ScoredChunk
@@ -43,3 +44,12 @@ class Retriever:
     ) -> list[ScoredChunk]:
         """Like `search`, restricted to `doc_type == bug_report`."""
         return self.search(text, BUG_REPORTS_ONLY, top_k, exclude_ids=exclude_ids)
+
+    def get_bug_report(self, doc_id: str) -> Chunk | None:
+        """Return the (single) chunk of bug report `doc_id`, or None if it is not stored.
+
+        Raises:
+            VectorStoreError: if the store fails.
+        """
+        chunk = self._store.get_chunk(doc_id)
+        return chunk if chunk is not None and chunk.doc_type is DocType.BUG_REPORT else None

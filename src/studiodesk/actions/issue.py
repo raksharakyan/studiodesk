@@ -60,17 +60,30 @@ def flagged_candidates(duplicates: DuplicateCheck) -> list[DuplicateCandidate]:
     return sorted(flagged, key=lambda c: c.score, reverse=True)[:MAX_POSSIBLE_DUPLICATES]
 
 
-def possible_duplicates_line(candidates: list[DuplicateCandidate]) -> str:
-    """Server-written line, e.g. `Possible duplicates: BUG-0002 (score 0.62)`."""
+def possible_duplicates_line(
+    candidates: list[DuplicateCandidate], duplicates: DuplicateCheck
+) -> str:
+    """Server-written line of canonical ids, deduplicated, best score first.
+
+    E.g. `Possible duplicates: BUG-0002 (score 0.62)`; a canonical id reached through
+    several candidates is listed once with its highest score.
+    """
+    best: dict[str, float] = {}
+    for candidate in candidates:
+        canonical = duplicates.canonical(candidate.doc_id)
+        if _BUG_ID_RE.fullmatch(canonical):
+            best[canonical] = max(best.get(canonical, candidate.score), candidate.score)
+    ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
     return "Possible duplicates: " + ", ".join(
-        f"{c.doc_id} (score {c.score:.2f})" for c in candidates
+        f"{doc_id} (score {score:.2f})" for doc_id, score in ranked
     )
 
 
 def build_issue_body(
-    report: NewBugReport, routing: RoutingResult, possible: list[DuplicateCandidate]
+    report: NewBugReport, routing: RoutingResult, duplicates: DuplicateCheck
 ) -> str:
     """Render the markdown body from report fields, routing and flagged ids, capped."""
+    possible = flagged_candidates(duplicates)
     lines = ["## Description", report.description, ""]
     if report.steps_to_reproduce:
         lines.append("## Steps to reproduce")
@@ -86,7 +99,7 @@ def build_issue_body(
         f"- Version: {report.version}",
         "",
         *_routing_lines(routing),
-        *([possible_duplicates_line(possible)] if possible else []),
+        *([possible_duplicates_line(possible, duplicates)] if possible else []),
         "",
         FOOTER,
     ]
@@ -101,12 +114,11 @@ def build_issue_draft(
 ) -> IssueDraft:
     """Build the exact issue (title, body, allowlisted labels) that confirm will create."""
     title = neutralise_mentions(report.title)[:ISSUE_TITLE_MAX_CHARS]
-    possible = flagged_candidates(duplicates)
     labels = list(routing.labels)
     if duplicates.verdict is DuplicateVerdict.POSSIBLE_DUPLICATE:
         labels.append(POSSIBLE_DUPLICATE_LABEL)
     return IssueDraft(
         title=title,
-        body=build_issue_body(report, routing, possible),
+        body=build_issue_body(report, routing, duplicates),
         labels=allowed_labels(labels),
     )

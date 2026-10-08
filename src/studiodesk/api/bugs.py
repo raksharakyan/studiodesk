@@ -106,6 +106,7 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
         return BugCheckResponse(
             verdict=duplicates.verdict,
             duplicate_of=duplicates.duplicate_of,
+            matched_report=duplicates.matched_report,
             candidates=duplicates.candidates,
             routing=routing,
             proposed_action=proposed,

@@ -104,10 +104,19 @@ class DuplicateCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     verdict: DuplicateVerdict
+    # Canonical original (root of the `duplicate_of` chain) of the matched report.
     duplicate_of: str | None = None
+    # The candidate that actually matched (may itself be a labelled duplicate).
+    matched_report: str | None = None
     candidates: list[DuplicateCandidate] = Field(default_factory=list)
     # Score from which a candidate counts as flagged even if the LLM said no.
     auto_threshold: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Candidate doc id -> canonical original id (server-side only, not in API responses).
+    canonical_ids: dict[str, str] = Field(default_factory=dict)
+
+    def canonical(self, doc_id: str) -> str:
+        """Canonical original of candidate `doc_id` (itself if unknown or not a duplicate)."""
+        return self.canonical_ids.get(doc_id, doc_id)
 
 
 class RoutingResult(BaseModel):
@@ -126,6 +135,8 @@ class RoutingResult(BaseModel):
 class BugCheckResponse(BaseModel):
     """Body returned by `POST /bugs/check`.
 
+    `duplicate_of` is the canonical original (the root of the matched report's
+    `duplicate_of` chain); `matched_report` is the report that actually matched.
     `proposed_action` is set unless the verdict is `duplicate`; nothing happens until it is
     confirmed via `POST /actions/{action_id}/confirm`.
     """
@@ -134,6 +145,7 @@ class BugCheckResponse(BaseModel):
 
     verdict: DuplicateVerdict
     duplicate_of: str | None
+    matched_report: str | None
     candidates: list[DuplicateCandidate]
     routing: RoutingResult
     proposed_action: ProposedAction | None

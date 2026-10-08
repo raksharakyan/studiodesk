@@ -12,6 +12,11 @@ Verdict:
   >= the auto threshold although the LLM says no (disagreement is surfaced, not hidden).
 - `new`: no candidate, or the LLM says no to every candidate below the auto threshold.
 
+`duplicate_of` is the canonical original: the matched candidate's `duplicate_of` payload
+field is followed up to the root (at most 5 hops, cycle-safe), e.g. a paraphrase of
+BUG-0002 that best matches BUG-0006 (itself labelled duplicate_of BUG-0002) reports
+`duplicate_of=BUG-0002, matched_report=BUG-0006`. Candidates are reported unchanged.
+
 Threshold calibration (pinned all-MiniLM-L6-v2, in-memory Qdrant, whole synthetic dataset,
 query = title + description, `doc_types=[bug_report]`, query bug excluded):
 
@@ -36,7 +41,7 @@ which still shows the candidate but keeps the issue proposal available.
 """
 
 import logging
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 
 from studiodesk.agent.retrieval import Retriever
 from studiodesk.llm import LLMClient
@@ -49,12 +54,14 @@ from studiodesk.models.bugs import (
     DuplicateVerdict,
     NewBugReport,
 )
+from studiodesk.models.chunks import Chunk
 from studiodesk.prompts import DUPLICATE_SYSTEM_PROMPT, build_duplicate_prompt
 from studiodesk.vectorstore import ScoredChunk
 
 logger = logging.getLogger(__name__)
 
 NO_JUDGEMENT_REASON = "No judgement returned for this candidate."
+MAX_CANONICAL_DEPTH = 5
 
 
 def check_duplicates(
@@ -92,7 +99,73 @@ def check_duplicates(
         DuplicateJudgements,
     )
     candidates = merge_judgements(shortlisted, result.judgements)
-    return decide_verdict(candidates, auto_threshold)
+    check = decide_verdict(candidates, auto_threshold)
+    # Lazy: the store is only queried when a candidate has a `duplicate_of` parent.
+    canonical_ids = resolve_canonical_ids(
+        shortlisted, lambda doc_id: retriever.get_bug_report(doc_id), exclude_ids
+    )
+    return check.model_copy(
+        update={
+            "canonical_ids": canonical_ids,
+            "duplicate_of": canonical_ids.get(check.duplicate_of, check.duplicate_of)
+            if check.duplicate_of
+            else None,
+        }
+    )
+
+
+def canonical_original(
+    doc_id: str,
+    parent: str | None,
+    lookup: Callable[[str], Chunk | None],
+    *,
+    excluded: Collection[str] = (),
+    max_depth: int = MAX_CANONICAL_DEPTH,
+) -> str:
+    """Follow `duplicate_of` links from `doc_id` (whose parent is `parent`) to the root.
+
+    Stops at a report without `duplicate_of`, at a report that is not stored, before an
+    `excluded` report (treated as absent from the index), on a cycle, or after
+    `max_depth` hops, returning the last id reached.
+    """
+    current = doc_id
+    visited = {doc_id}
+    for _ in range(max_depth):
+        if parent is None or parent in visited or parent in excluded:
+            break
+        visited.add(parent)
+        current = parent
+        chunk = lookup(current)
+        parent = chunk.duplicate_of if chunk is not None else None
+    return current
+
+
+def resolve_canonical_ids(
+    hits: list[ScoredChunk],
+    lookup: Callable[[str], Chunk | None],
+    exclude_ids: Collection[str] = (),
+) -> dict[str, str]:
+    """Map each hit's doc id to its canonical original (lookups cached per call).
+
+    Excluded ids (e.g. the query report itself in evals) are treated as absent, so a chain
+    is never resolved to or through them.
+
+    Raises:
+        VectorStoreError: if a lookup fails.
+    """
+    cache: dict[str, Chunk | None] = {}
+
+    def cached(doc_id: str) -> Chunk | None:
+        if doc_id not in cache:
+            cache[doc_id] = lookup(doc_id)
+        return cache[doc_id]
+
+    resolved: dict[str, str] = {}
+    for hit in hits:
+        resolved[hit.chunk.doc_id] = canonical_original(
+            hit.chunk.doc_id, hit.chunk.duplicate_of, cached, excluded=exclude_ids
+        )
+    return resolved
 
 
 def merge_judgements(
@@ -136,6 +209,7 @@ def decide_verdict(candidates: list[DuplicateCandidate], auto_threshold: float) 
         return DuplicateCheck(
             verdict=DuplicateVerdict.DUPLICATE,
             duplicate_of=best.doc_id,
+            matched_report=best.doc_id,
             candidates=candidates,
             auto_threshold=auto_threshold,
         )

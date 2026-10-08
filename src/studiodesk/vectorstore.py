@@ -20,7 +20,7 @@ from qdrant_client.http import models as qm
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from studiodesk.config import Settings
-from studiodesk.models.chunks import Chunk
+from studiodesk.models.chunks import Chunk, chunk_point_id
 from studiodesk.models.documents import version_to_int
 from studiodesk.models.search import SearchFilters
 
@@ -274,6 +274,23 @@ class QdrantStore:
                 continue
             results.append(ScoredChunk(chunk=chunk, score=point.score))
         return results
+
+    def get_chunk(self, doc_id: str, chunk_index: int = 0) -> Chunk | None:
+        """Fetch one chunk by its deterministic point id (no payload filter needed).
+
+        Returns None if the point is missing or its payload no longer validates.
+        """
+        with _store_errors("retrieve"):
+            records = self._client.retrieve(
+                self.collection, ids=[chunk_point_id(doc_id, chunk_index)], with_payload=True
+            )
+        if not records:
+            return None
+        try:
+            return Chunk.model_validate(records[0].payload or {})
+        except ValidationError:
+            logger.warning("skipping point with invalid payload", extra={"point": records[0].id})
+            return None
 
     def count(self) -> int:
         """Return the exact number of points in the collection."""
