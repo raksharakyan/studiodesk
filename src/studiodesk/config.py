@@ -13,7 +13,7 @@ RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 DEFAULT_LLM_MODELS = {
-    "groq": "llama-3.3-70b-versatile",
+    "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-sonnet-5-5",
 }
 
@@ -49,9 +49,12 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     # Sampling temperature (used by Groq; structured Anthropic calls use the default).
     llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
+    # Groq only: reasoning effort for the (reasoning) model, e.g. openai/gpt-oss-120b.
+    llm_reasoning_effort: Literal["low", "medium", "high"] = "medium"
     # Output effort for the model (`output_config.effort`).
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
-    llm_max_tokens: int = Field(default=2048, gt=0, le=32_000)
+    # Reasoning models spend part of this budget on reasoning tokens.
+    llm_max_tokens: int = Field(default=4096, gt=0, le=32_000)
     llm_timeout_s: float = Field(default=60.0, gt=0, le=600)
     # Server-side retry on a substitute model when the requested model declines.
     llm_refusal_fallback: bool = True

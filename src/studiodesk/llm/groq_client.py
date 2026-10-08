@@ -7,6 +7,10 @@ the call is retried exactly once with the validation errors appended to the user
 (error locations and messages only, never the offending input); a second failure raises
 `LLMInvalidOutput`, which the API returns as a generic 502.
 
+The default model `openai/gpt-oss-120b` is a reasoning model: `reasoning_effort` comes from
+settings and `include_reasoning=False` keeps reasoning out of the response; only
+`message.content` is ever parsed.
+
 Sampling uses a low temperature from settings, `max_tokens` is capped from settings, and
 the SDK client has the configured timeout and `max_retries=2`. Rate limits are handled
 only by the SDK's own retries (which honour `Retry-After` up to 60 s); the adapter never
@@ -17,6 +21,7 @@ counts are.
 
 import json
 import logging
+from typing import Literal
 
 import groq
 from groq.types.chat import ChatCompletion, ChatCompletionMessageParam
@@ -31,6 +36,8 @@ from studiodesk.llm.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+ReasoningEffort = Literal["low", "medium", "high"]
 
 GROQ_BASE_URL = "https://api.groq.com"
 LLM_MAX_RETRIES = 2
@@ -63,20 +70,28 @@ class GroqLLM:
     """`LLMClient` backed by Groq chat completions in JSON mode."""
 
     def __init__(
-        self, client: groq.Groq, *, model: str, max_tokens: int, temperature: float = 0.1
+        self,
+        client: groq.Groq,
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float = 0.1,
+        reasoning_effort: ReasoningEffort = "medium",
     ) -> None:
         """Wrap an SDK client; the caller owns it (see `close`).
 
         Args:
             client: Configured SDK client (key, timeout and retries already set).
-            model: Model id, e.g. `llama-3.3-70b-versatile`.
+            model: Model id, e.g. `openai/gpt-oss-120b`.
             max_tokens: Upper bound on generated tokens per call.
             temperature: Sampling temperature (keep it low for consistent judgements).
+            reasoning_effort: Reasoning effort, sent with `include_reasoning=False`.
         """
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._reasoning_effort: ReasoningEffort = reasoning_effort
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "GroqLLM":
@@ -98,6 +113,7 @@ class GroqLLM:
             model=settings.resolved_llm_model,
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
+            reasoning_effort=settings.llm_reasoning_effort,
         )
 
     def close(self) -> None:
@@ -144,6 +160,8 @@ class GroqLLM:
                 response_format={"type": "json_object"},
                 temperature=self._temperature,
                 max_completion_tokens=self._max_tokens,
+                reasoning_effort=self._reasoning_effort,
+                include_reasoning=False,
             )
         except (
             groq.RateLimitError,
@@ -157,7 +175,10 @@ class GroqLLM:
 
 
 def _message_text(completion: ChatCompletion) -> str:
-    """Check the finish reason and return the first choice's content."""
+    """Check the finish reason and return the first choice's `message.content` only.
+
+    Any `message.reasoning` (reasoning models) is ignored, never parsed as the answer.
+    """
     usage = completion.usage
     choice = completion.choices[0] if completion.choices else None
     logger.info(

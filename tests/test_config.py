@@ -58,7 +58,8 @@ def test_defaults() -> None:
     assert s.log_level == "INFO"
     assert s.llm_provider == "groq"
     assert s.llm_model is None
-    assert s.resolved_llm_model == "llama-3.3-70b-versatile"
+    assert s.resolved_llm_model == "openai/gpt-oss-120b"
+    assert s.llm_reasoning_effort == "medium"
     assert s.qdrant_collection == "studiodesk"
     assert s.embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
     assert s.max_request_bytes == 64_000
