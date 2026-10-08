@@ -23,9 +23,15 @@ NO_CONTEXT_ANSWER = (
 )
 _ELLIPSIS = "..."
 UNVERIFIED_SOURCE = "[unverified source]"
-# A single bracketed document id, e.g. [BUG-0001], [CRASH-0003], [PATCH-1.0.1], [DOC-faq].
-BRACKETED_ID_RE = re.compile(
-    r"\[(BUG-\d{4}|CRASH-\d{4}|PATCH-\d+\.\d+\.\d+|DOC-[a-z0-9]+(?:-[a-z0-9]+)*)\]"
+DOC_ID_PATTERN = r"(?:BUG-\d{4}|CRASH-\d{4}|PATCH-\d+\.\d+\.\d+|DOC-[a-z0-9]+(?:-[a-z0-9]+)*)"
+# Boundaries: not part of a longer token on either side (letters, digits, `_`, `-`, or a
+# `.` that continues a version, e.g. PATCH-1.0.1.5); a sentence-final `.` is fine.
+_ID_START = r"(?<![A-Za-z0-9_.\-])"
+_ID_END = r"(?![A-Za-z0-9_\-]|\.\d)"
+# A lone bracketed id ("[BUG-0001]") is replaced as a whole so no double brackets appear;
+# any other occurrence (bare, in lists, in parentheses) is replaced token by token.
+DOC_ID_RE = re.compile(
+    rf"\[\s*(?P<lone>{DOC_ID_PATTERN})\s*\]|{_ID_START}(?P<bare>{DOC_ID_PATTERN}){_ID_END}"
 )
 
 
@@ -40,8 +46,8 @@ def answer_question(
     """Retrieve `top_k` chunks, ask the LLM, and keep only citations that were retrieved.
 
     With nothing retrieved the LLM is not called. Cited ids the model invents (not in the
-    retrieved set) are dropped, and bracketed ids in the answer text that were not
-    retrieved become `[unverified source]`; `removed_citations` counts the distinct ids
+    retrieved set) are dropped, and any doc id in the answer text that was not retrieved
+    becomes `[unverified source]`; `removed_citations` counts the distinct ids
     removed either way. This does not rely on the model following instructions.
 
     Raises:
@@ -73,20 +79,22 @@ def answer_question(
 
 
 def strip_unverified_citations(text: str, retrieved_ids: set[str]) -> tuple[str, set[str]]:
-    """Replace bracketed doc ids that were not retrieved with `[unverified source]`.
+    """Replace every doc id in `text` that was not retrieved with `[unverified source]`.
 
-    Returns the cleaned text and the distinct ids that were replaced.
+    Ids are found anywhere (bracketed, in lists like `[BUG-0001, BUG-9999]`, in
+    parentheses or bare); retrieved ids are kept. Returns the cleaned text and the
+    distinct ids that were replaced.
     """
     removed: set[str] = set()
 
     def replace(match: re.Match[str]) -> str:
-        doc_id = match.group(1)
+        doc_id = match.group("lone") or match.group("bare")
         if doc_id in retrieved_ids:
             return match.group(0)
         removed.add(doc_id)
         return UNVERIFIED_SOURCE
 
-    return BRACKETED_ID_RE.sub(replace, text), removed
+    return DOC_ID_RE.sub(replace, text), removed
 
 
 def cited_sources(cited_ids: list[str], hits: list[ScoredChunk]) -> list[AnswerSource]:
