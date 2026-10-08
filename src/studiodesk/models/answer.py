@@ -56,3 +56,5 @@ class AnswerResponse(BaseModel):
     answer: str = Field(max_length=ANSWER_MAX_CHARS)
     insufficient_context: bool
     sources: list[AnswerSource] = Field(max_length=MAX_CITED_IDS)
+    # Distinct doc ids cited by the model (list or bracketed in the text) but not retrieved.
+    removed_citations: int = Field(ge=0)

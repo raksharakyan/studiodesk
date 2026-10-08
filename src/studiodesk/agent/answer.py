@@ -1,6 +1,7 @@
 """Answer a question from retrieved documents, with server-verified citations."""
 
 import logging
+import re
 
 from studiodesk.agent.retrieval import Retriever
 from studiodesk.llm import LLMClient
@@ -21,6 +22,11 @@ NO_CONTEXT_ANSWER = (
     "I could not find any bug reports, crash logs, patch notes or support docs about that."
 )
 _ELLIPSIS = "..."
+UNVERIFIED_SOURCE = "[unverified source]"
+# A single bracketed document id, e.g. [BUG-0001], [CRASH-0003], [PATCH-1.0.1], [DOC-faq].
+BRACKETED_ID_RE = re.compile(
+    r"\[(BUG-\d{4}|CRASH-\d{4}|PATCH-\d+\.\d+\.\d+|DOC-[a-z0-9]+(?:-[a-z0-9]+)*)\]"
+)
 
 
 def answer_question(
@@ -34,7 +40,9 @@ def answer_question(
     """Retrieve `top_k` chunks, ask the LLM, and keep only citations that were retrieved.
 
     With nothing retrieved the LLM is not called. Cited ids the model invents (not in the
-    retrieved set) are dropped, so every returned source really backs the answer context.
+    retrieved set) are dropped, and bracketed ids in the answer text that were not
+    retrieved become `[unverified source]`; `removed_citations` counts the distinct ids
+    removed either way. This does not rely on the model following instructions.
 
     Raises:
         VectorStoreError: if retrieval fails.
@@ -42,21 +50,43 @@ def answer_question(
     """
     hits = retriever.search(question, filters, top_k)
     if not hits:
-        return AnswerResponse(answer=NO_CONTEXT_ANSWER, insufficient_context=True, sources=[])
+        return AnswerResponse(
+            answer=NO_CONTEXT_ANSWER, insufficient_context=True, sources=[], removed_citations=0
+        )
     result = llm.structured(
         ANSWER_SYSTEM_PROMPT,
         build_answer_prompt(question, [hit.chunk for hit in hits]),
         LLMAnswer,
     )
+    retrieved_ids = {hit.chunk.doc_id for hit in hits}
     sources = cited_sources(result.cited_ids, hits)
-    dropped = len(set(result.cited_ids)) - len(sources)
-    if dropped:
-        logger.warning("dropped citations not in the retrieved set", extra={"count": dropped})
+    answer, text_removed = strip_unverified_citations(result.answer, retrieved_ids)
+    removed = text_removed | (set(result.cited_ids) - retrieved_ids)
+    if removed:
+        logger.warning("removed citations not in the retrieved set", extra={"count": len(removed)})
     return AnswerResponse(
-        answer=_truncate(result.answer.strip(), ANSWER_MAX_CHARS),
+        answer=_truncate(answer.strip(), ANSWER_MAX_CHARS),
         insufficient_context=result.insufficient_context,
         sources=sources,
+        removed_citations=len(removed),
     )
+
+
+def strip_unverified_citations(text: str, retrieved_ids: set[str]) -> tuple[str, set[str]]:
+    """Replace bracketed doc ids that were not retrieved with `[unverified source]`.
+
+    Returns the cleaned text and the distinct ids that were replaced.
+    """
+    removed: set[str] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        doc_id = match.group(1)
+        if doc_id in retrieved_ids:
+            return match.group(0)
+        removed.add(doc_id)
+        return UNVERIFIED_SOURCE
+
+    return BRACKETED_ID_RE.sub(replace, text), removed
 
 
 def cited_sources(cited_ids: list[str], hits: list[ScoredChunk]) -> list[AnswerSource]:

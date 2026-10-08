@@ -77,7 +77,7 @@ def test_ask_drops_citations_that_were_not_retrieved(
     llm = FakeLLM(
         {
             LLMAnswer: LLMAnswer(
-                answer="Fixed in 1.0.1.",
+                answer="Fixed in 1.0.1 [BUG-0001], see also [BUG-9999].",
                 cited_ids=["BUG-0001", "BUG-9999"],
                 insufficient_context=False,
             )
@@ -85,13 +85,15 @@ def test_ask_drops_citations_that_were_not_retrieved(
     )
     for client in make_client(ingested_store, fake_embedder, llm, github_api):
         response = client.post(
-            "/ask", json={"question": "Why does my save get corrupted after cryo sleep?"}
+            "/ask",
+            json={"question": "Why does my save get corrupted after cryo sleep on PS5?"},
         )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["answer"] == "Fixed in 1.0.1."
-    assert "BUG-9999" not in [source["doc_id"] for source in body["sources"]]
+    assert body["answer"] == "Fixed in 1.0.1 [BUG-0001], see also [unverified source]."
+    assert body["removed_citations"] == 1
+    assert [source["doc_id"] for source in body["sources"]] == ["BUG-0001"]
     assert "<user_question>" in llm.calls[0].user_content
 
 
