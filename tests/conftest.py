@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import math
+import os
 import shutil
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -49,6 +50,23 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "slow: loads the real embedding model; deselect with -m 'not slow'"
     )
+    config.addinivalue_line(
+        "markers",
+        "live: calls real external services; skipped unless STUDIODESK_LIVE=1 is set",
+    )
+
+
+LIVE_ENV_VAR = "STUDIODESK_LIVE"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip `@pytest.mark.live` tests unless STUDIODESK_LIVE=1 (never in the default run)."""
+    if os.environ.get(LIVE_ENV_VAR) == "1":
+        return
+    skip_live = pytest.mark.skip(reason=f"live test: set {LIVE_ENV_VAR}=1 to run")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip_live)
 
 
 @pytest.fixture(autouse=True)
