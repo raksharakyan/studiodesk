@@ -1,18 +1,23 @@
 """answer_question: server-verified citations, no-retrieval path and error propagation."""
 
 import pytest
+from fastapi.testclient import TestClient
 
-from fakes import FakeLLM, FakeRetriever, scored
+from fakes import FakeLLM, FakeRetriever, prompt_doc_ids, scored
 from studiodesk.agent.answer import (
     NO_CONTEXT_ANSWER,
     UNVERIFIED_SOURCE,
     answer_question,
     strip_unverified_citations,
 )
+from studiodesk.config import Settings
+from studiodesk.embeddings import Embedder
 from studiodesk.llm import LLMInvalidOutput, LLMUnavailable
+from studiodesk.main import create_app
 from studiodesk.models.answer import ANSWER_MAX_CHARS, MAX_CITED_IDS, AnswerResponse, LLMAnswer
 from studiodesk.models.documents import DocType
 from studiodesk.prompts import ANSWER_SYSTEM_PROMPT
+from studiodesk.vectorstore import QdrantStore
 
 
 def _hits() -> FakeRetriever:
@@ -132,3 +137,115 @@ def test_llm_errors_propagate(error: Exception) -> None:
     llm = FakeLLM({LLMAnswer: error})
     with pytest.raises(type(error)):
         answer_question("q", None, _hits(), llm, top_k=6)
+
+
+# --------------------------------------------------------------------------- id scanning (d2f9b99)
+
+RETRIEVED = {"BUG-0001", "PATCH-1.0.1", "DOC-player-faq"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "removed"),
+    [
+        ("[BUG-0001, BUG-9999]", f"[BUG-0001, {UNVERIFIED_SOURCE}]", {"BUG-9999"}),
+        (
+            "[BUG-9999; CRASH-0042]",
+            f"[{UNVERIFIED_SOURCE}; {UNVERIFIED_SOURCE}]",
+            {"BUG-9999", "CRASH-0042"},
+        ),
+        ("(BUG-9999)", f"({UNVERIFIED_SOURCE})", {"BUG-9999"}),
+        (
+            "(see BUG-0001 and PATCH-9.9.9)",
+            f"(see BUG-0001 and {UNVERIFIED_SOURCE})",
+            {"PATCH-9.9.9"},
+        ),
+        ("Fixed per BUG-9999 today", f"Fixed per {UNVERIFIED_SOURCE} today", {"BUG-9999"}),
+        ("It was fixed in BUG-9999.", f"It was fixed in {UNVERIFIED_SOURCE}.", {"BUG-9999"}),
+        ("See PATCH-1.0.1.", "See PATCH-1.0.1.", set()),  # retrieved, sentence-final period
+        ("See DOC-made-up.", f"See {UNVERIFIED_SOURCE}.", {"DOC-made-up"}),
+        ("[ BUG-9999 ]", UNVERIFIED_SOURCE, {"BUG-9999"}),  # lone bracket replaced whole
+        ("BUG-0001, [BUG-0001] (DOC-player-faq)", "BUG-0001, [BUG-0001] (DOC-player-faq)", set()),
+    ],
+)
+def test_unretrieved_ids_are_replaced_anywhere(text: str, expected: str, removed: set[str]) -> None:
+    assert strip_unverified_citations(text, RETRIEVED) == (expected, removed)
+
+
+def test_repeated_unretrieved_id_is_counted_once() -> None:
+    result, _ = _ask(
+        LLMAnswer(
+            answer="BUG-9999 again (BUG-9999), [BUG-9999] and [BUG-0001, BUG-9999].",
+            cited_ids=["BUG-9999"],
+            insufficient_context=False,
+        )
+    )
+
+    assert "BUG-9999" not in result.answer
+    assert result.answer.count(UNVERIFIED_SOURCE) == 4
+    assert result.removed_citations == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "BUG-00012",  # five digits: not an id
+        "XBUG-0001",  # glued prefix
+        "BUG-0001x",  # glued suffix
+        "BUG-9999_x",
+        "PATCH-1.0.1.5",  # longer version: not PATCH-1.0.1
+        "PATCH-9.9.9.5",
+        "DOC-player-faq-",  # trailing hyphen: not a valid DOC id
+        "DOC-made-up-",
+        "bug-9999",  # ids are upper-case
+    ],
+)
+def test_near_miss_tokens_are_left_unchanged(text: str) -> None:
+    sentence = f"See {text} for details."
+    assert strip_unverified_citations(sentence, RETRIEVED) == (sentence, set())
+
+
+def test_hyphen_prefixed_id_is_a_known_gap() -> None:
+    """Documented limitation: an id glued to a preceding word by a hyphen ("my-BUG-9999")
+    is not treated as an id (the start boundary rejects `-`), so it stays in the text
+    even though BUG-9999 was not retrieved. This asserts the current behaviour; it never
+    reaches `sources`, since those come only from retrieved ids."""
+    text = "See my-BUG-9999 here."
+    assert strip_unverified_citations(text, RETRIEVED) == (text, set())
+
+
+# --------------------------------------------------------------------------- end to end /ask
+
+
+def test_ask_endpoint_replaces_unretrieved_ids_in_any_form(
+    ingested_store: QdrantStore, fake_embedder: Embedder
+) -> None:
+    answer = LLMAnswer(
+        answer=(
+            "Fixed in [BUG-0001, BUG-9999] (CRASH-0999) and per BUG-9999. "
+            "See XBUG-0001, BUG-00012 and PATCH-1.0.1.5."
+        ),
+        cited_ids=["BUG-0001", "BUG-9999"],
+        insufficient_context=False,
+    )
+    llm = FakeLLM({LLMAnswer: answer})
+    app = create_app(
+        Settings(_env_file=None, app_env="test", answer_top_k=20),
+        embedder=fake_embedder,
+        store=ingested_store,
+        llm=llm,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/ask", json={"question": "Why does my save get corrupted after cryo sleep on PS5?"}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    retrieved = set(prompt_doc_ids(llm.calls[0].user_content))
+    assert "BUG-0001" in retrieved and "BUG-9999" not in retrieved
+    assert body["answer"] == (
+        f"Fixed in [BUG-0001, {UNVERIFIED_SOURCE}] ({UNVERIFIED_SOURCE}) and per "
+        f"{UNVERIFIED_SOURCE}. See XBUG-0001, BUG-00012 and PATCH-1.0.1.5."
+    )
+    assert body["removed_citations"] == 2  # BUG-9999, CRASH-0999
+    assert [s["doc_id"] for s in body["sources"]] == ["BUG-0001"]

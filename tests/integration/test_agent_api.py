@@ -782,3 +782,15 @@ def test_lifespan_builds_clients_from_settings_without_network(
     assert response.status_code == 200
     assert response.json()["proposed_action"]["repo"] == FAKE_REPO
     assert GITHUB_TOKEN not in response.text
+
+
+@pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_llm_confidence_is_not_a_500(make_api: MakeApi, raw: float) -> None:
+    api = make_api(
+        _judgements(judge_all(True, confidence=raw)),
+        dup_candidate_threshold=0.0,
+        dup_auto_threshold=1.0,
+    )
+    response = api.check()
+    assert response.status_code == 200
+    assert all(c["confidence"] == 0.0 for c in response.json()["candidates"])

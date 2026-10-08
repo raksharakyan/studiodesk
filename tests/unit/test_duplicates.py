@@ -157,13 +157,22 @@ def test_confidence_is_clamped(raw: float, clamped: float) -> None:
     assert result.candidates[0].confidence == clamped
 
 
-def test_nan_confidence_is_handled() -> None:
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_confidence_becomes_zero(raw: str) -> None:
     judgements = DuplicateJudgements.model_validate_json(
         '{"judgements": [{"candidate_id": "BUG-0002", "is_duplicate": true, '
-        '"confidence": NaN, "reason": "r"}]}'
+        f'"confidence": {raw}, "reason": "r"}}]}}'
     )
-    candidates = merge_judgements([scored("BUG-0002", 0.6)], judgements.judgements)
-    assert not math.isnan(candidates[0].confidence)
+    [candidate] = merge_judgements([scored("BUG-0002", 0.6)], judgements.judgements)
+    assert candidate.confidence == 0.0
+    assert candidate.is_duplicate is True  # only the confidence is distrusted
+
+
+@pytest.mark.parametrize("raw", [math.nan, math.inf, -math.inf])
+def test_non_finite_confidence_end_to_end_verdict(raw: float) -> None:
+    result, _ = _run([scored("BUG-0002", 0.8)], [_judgement("BUG-0002", True, confidence=raw)])
+    assert result.verdict is DuplicateVerdict.DUPLICATE
+    assert result.candidates[0].confidence == 0.0
 
 
 def test_reason_is_stripped_and_truncated() -> None:
