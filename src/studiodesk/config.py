@@ -55,7 +55,15 @@ class Settings(BaseSettings):
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     # Reasoning models spend part of this budget on reasoning tokens.
     llm_max_tokens: int = Field(default=4096, gt=0, le=32_000)
-    llm_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    llm_timeout_s: float = Field(default=30.0, gt=0, le=600)
+    # Overall budget per LLM call including retries; no schema or rate-limit retry starts
+    # once it is spent.
+    llm_request_deadline_s: float = Field(default=75.0, gt=0, le=600)
+    # Process-wide cap on concurrent LLM calls; a call waits at most llm_concurrency_wait_s
+    # for a slot, else 503 with Retry-After: llm_busy_retry_after_s.
+    llm_max_concurrency: int = Field(default=4, ge=1, le=64)
+    llm_concurrency_wait_s: float = Field(default=2.0, ge=0, le=30)
+    llm_busy_retry_after_s: int = Field(default=5, ge=1, le=300)
     # Interactive routes: retry a transient failure at most this often, and only when the
     # wait (Retry-After or backoff) is <= llm_max_retry_wait_s; longer waits fail fast (503).
     llm_max_retries: int = Field(default=1, ge=0, le=3)

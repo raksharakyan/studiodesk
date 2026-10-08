@@ -34,6 +34,7 @@ from studiodesk.llm.base import (
     LLMTruncated,
     LLMUnavailable,
     call_with_retry,
+    remaining_s,
     unavailable_from,
 )
 
@@ -81,7 +82,9 @@ class GroqLLM:
         timeout_s: float = 60.0,
         max_retries: int = 1,
         max_retry_wait_s: float = 10.0,
+        request_deadline_s: float = 75.0,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Wrap an SDK client; the caller owns it (see `close`).
 
@@ -94,7 +97,9 @@ class GroqLLM:
             timeout_s: Per-request timeout.
             max_retries: Retries of a transient failure (see `call_with_retry`).
             max_retry_wait_s: Longest wait before a retry; longer waits fail fast.
+            request_deadline_s: Budget per `structured` call including all retries.
             sleep: Sleep function (injectable for tests).
+            monotonic: Clock for the deadline (injectable for tests).
         """
         self._client = client
         self._model = model
@@ -105,6 +110,8 @@ class GroqLLM:
         self._max_retries = max_retries
         self._max_retry_wait_s = max_retry_wait_s
         self._sleep = sleep
+        self._request_deadline_s = request_deadline_s
+        self._monotonic = monotonic
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "GroqLLM":
@@ -130,6 +137,7 @@ class GroqLLM:
             timeout_s=settings.llm_timeout_s,
             max_retries=settings.llm_max_retries,
             max_retry_wait_s=settings.llm_max_retry_wait_s,
+            request_deadline_s=settings.llm_request_deadline_s,
         )
 
     def close(self) -> None:
@@ -147,38 +155,50 @@ class GroqLLM:
             LLMInvalidOutput: if the output fails validation twice (or is empty).
         """
         system_prompt = schema_system_prompt(system, schema)
+        deadline = self._monotonic() + self._request_deadline_s
         try:
-            return schema.model_validate_json(self._complete(system_prompt, user_content))
+            return schema.model_validate_json(self._complete(system_prompt, user_content, deadline))
         except ValidationError as exc:
             logger.warning(
                 "llm output failed validation, retrying once",
                 extra={"schema": schema.__name__, "errors": exc.error_count()},
             )
             retry_content = user_content + RETRY_INSTRUCTIONS + validation_summary(exc)
+        if self._monotonic() >= deadline:
+            raise LLMInvalidOutput(
+                f"model output did not match {schema.__name__}; deadline left no retry"
+            )
         try:
-            return schema.model_validate_json(self._complete(system_prompt, retry_content))
+            return schema.model_validate_json(
+                self._complete(system_prompt, retry_content, deadline)
+            )
         except ValidationError as exc:
             raise LLMInvalidOutput(
                 f"model output did not match {schema.__name__} after retry: "
                 f"{exc.error_count()} errors"
             ) from None
 
-    def _complete(self, system: str, user_content: str) -> str:
+    def _complete(self, system: str, user_content: str, deadline: float) -> str:
         """Send one JSON-mode request (with the capped retry policy); return the text."""
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ]
         completion = call_with_retry(
-            lambda: self._request(messages),
+            lambda: self._request(messages, deadline),
             max_retries=self._max_retries,
             max_wait_s=self._max_retry_wait_s,
             sleep=self._sleep,
+            deadline=deadline,
+            monotonic=self._monotonic,
         )
         return _message_text(completion)
 
-    def _request(self, messages: list[ChatCompletionMessageParam]) -> ChatCompletion:
-        """One HTTP request, every SDK error mapped to `LLMUnavailable`."""
+    def _request(
+        self, messages: list[ChatCompletionMessageParam], deadline: float
+    ) -> ChatCompletion:
+        """One HTTP request (timeout capped by the deadline), SDK errors -> `LLMUnavailable`."""
+        timeout = min(self._timeout_s, remaining_s(deadline, self._monotonic))
         try:
             return self._client.chat.completions.create(
                 model=self._model,
@@ -188,7 +208,7 @@ class GroqLLM:
                 max_completion_tokens=self._max_tokens,
                 reasoning_effort=self._reasoning_effort,
                 include_reasoning=False,
-                timeout=self._timeout_s,
+                timeout=timeout,
             )
         except (
             groq.RateLimitError,

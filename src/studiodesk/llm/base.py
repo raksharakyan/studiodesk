@@ -5,8 +5,10 @@ neither SDK can cap how long it honours `Retry-After` (Anthropic 1.x waits for a
 positive value, Groq for up to 60 s), which would block a request handler. Instead
 `call_with_retry` retries a transient failure at most `llm_max_retries` (default 1) times
 and only if the wait (`Retry-After`, else a short backoff) is <= `llm_max_retry_wait_s`
-(default 10 s). A longer wait fails fast with `LLMUnavailable(retry_after_s=...)`, which
-the API returns as 503 with a `Retry-After` header.
+(default 10 s) and ends before the call's deadline (`llm_request_deadline_s`, default 75 s,
+which also stops Groq's schema retry). A longer wait fails fast with
+`LLMUnavailable(retry_after_s=...)`, which the API returns as 503 with a `Retry-After`
+header.
 """
 
 import email.utils
@@ -123,12 +125,23 @@ def call_with_retry[T](
     max_retries: int,
     max_wait_s: float,
     sleep: Callable[[float], None] = time.sleep,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> T:
     """Run `call`, retrying transient `LLMUnavailable` errors with a capped wait.
 
+    Args:
+        call: The request to make.
+        max_retries: Retries after the first attempt.
+        max_wait_s: Longest wait before a retry.
+        sleep: Sleep function (injectable).
+        deadline: `monotonic()` value after which no retry is started.
+        monotonic: Clock for `deadline` (injectable).
+
     Raises:
-        LLMUnavailable: when not retryable, out of retries, or the wait would exceed
-            `max_wait_s` (then `retry_after_s` tells the client how long to wait).
+        LLMUnavailable: when not retryable, out of retries, the wait would exceed
+            `max_wait_s` or pass `deadline` (then `retry_after_s`, if any, tells the
+            client how long to wait).
     """
     attempt = 0
     while True:
@@ -142,7 +155,19 @@ def call_with_retry[T](
                 if exc.retry_after_s is not None
                 else INITIAL_BACKOFF_S * 2**attempt
             )
-            if wait > max_wait_s:
+            if wait > max_wait_s or (deadline is not None and monotonic() + wait >= deadline):
                 raise
             sleep(wait)
             attempt += 1
+
+
+def remaining_s(deadline: float, monotonic: Callable[[], float]) -> float:
+    """Seconds left until `deadline`.
+
+    Raises:
+        LLMUnavailable: if the deadline has passed (no further attempt is made).
+    """
+    left = deadline - monotonic()
+    if left <= 0:
+        raise LLMUnavailable("llm request deadline exceeded")
+    return left

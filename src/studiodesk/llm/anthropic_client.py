@@ -34,6 +34,7 @@ from studiodesk.llm.base import (
     LLMTruncated,
     LLMUnavailable,
     call_with_retry,
+    remaining_s,
     unavailable_from,
 )
 
@@ -61,7 +62,9 @@ class AnthropicLLM:
         timeout_s: float = 60.0,
         max_retries: int = 1,
         max_retry_wait_s: float = 10.0,
+        request_deadline_s: float = 75.0,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Wrap an SDK client; the caller owns it (see `close`).
 
@@ -74,7 +77,9 @@ class AnthropicLLM:
             timeout_s: Per-request timeout.
             max_retries: Retries of a transient failure (see `call_with_retry`).
             max_retry_wait_s: Longest wait before a retry; longer waits fail fast.
+            request_deadline_s: Budget per `structured` call including all retries.
             sleep: Sleep function (injectable for tests).
+            monotonic: Clock for the deadline (injectable for tests).
         """
         self._client = client
         self._model = model
@@ -85,6 +90,8 @@ class AnthropicLLM:
         self._max_retries = max_retries
         self._max_retry_wait_s = max_retry_wait_s
         self._sleep = sleep
+        self._request_deadline_s = request_deadline_s
+        self._monotonic = monotonic
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AnthropicLLM":
@@ -110,6 +117,7 @@ class AnthropicLLM:
             timeout_s=settings.llm_timeout_s,
             max_retries=settings.llm_max_retries,
             max_retry_wait_s=settings.llm_max_retry_wait_s,
+            request_deadline_s=settings.llm_request_deadline_s,
         )
 
     def close(self) -> None:
@@ -127,11 +135,14 @@ class AnthropicLLM:
             LLMTruncated: if the output hit the token limit.
             LLMInvalidOutput: if the output is not valid JSON for `schema`.
         """
+        deadline = self._monotonic() + self._request_deadline_s
         message = call_with_retry(
-            lambda: self._create(system, user_content, schema),
+            lambda: self._create(system, user_content, schema, deadline),
             max_retries=self._max_retries,
             max_wait_s=self._max_retry_wait_s,
             sleep=self._sleep,
+            deadline=deadline,
+            monotonic=self._monotonic,
         )
         logger.info(
             "llm call completed",
@@ -145,8 +156,11 @@ class AnthropicLLM:
         _check_stop_reason(message)
         return _parse_output(message, schema)
 
-    def _create(self, system: str, user_content: str, schema: type[BaseModel]) -> BetaMessage:
-        """Send the request, mapping every SDK error to `LLMUnavailable`."""
+    def _create(
+        self, system: str, user_content: str, schema: type[BaseModel], deadline: float
+    ) -> BetaMessage:
+        """Send the request (timeout capped by the deadline), SDK errors -> `LLMUnavailable`."""
+        timeout = min(self._timeout_s, remaining_s(deadline, self._monotonic))
         output_config: BetaOutputConfigParam = {
             "effort": self._effort,
             "format": {"type": "json_schema", "schema": anthropic.transform_schema(schema)},
@@ -161,7 +175,7 @@ class AnthropicLLM:
                     output_config=output_config,
                     fallbacks="default",
                     betas=[REFUSAL_FALLBACK_BETA],
-                    timeout=self._timeout_s,
+                    timeout=timeout,
                 )
             return self._client.beta.messages.create(
                 model=self._model,
@@ -169,7 +183,7 @@ class AnthropicLLM:
                 system=system,
                 messages=[{"role": "user", "content": user_content}],
                 output_config=output_config,
-                timeout=self._timeout_s,
+                timeout=timeout,
             )
         except (
             anthropic.RateLimitError,

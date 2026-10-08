@@ -27,6 +27,7 @@ from studiodesk.api.ratelimit import build_limiter, rate_limit_exceeded_handler
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder, SentenceTransformerEmbedder
 from studiodesk.llm import LLMClient, build_llm
+from studiodesk.llm.limits import LLMConcurrencyGate
 from studiodesk.logging import configure_logging
 from studiodesk.middleware import BodySizeLimitMiddleware
 from studiodesk.vectorstore import QdrantStore, build_qdrant_client
@@ -105,6 +106,7 @@ def _make_lifespan(settings: Settings, injected: Injected) -> Lifespan:
             app.state.llm = (
                 injected.llm if injected.llm is not None else _build_llm(settings, stack)
             )
+            app.state.llm_gate = LLMConcurrencyGate.from_settings(settings)
             app.state.proposals = (
                 injected.proposals
                 if injected.proposals is not None

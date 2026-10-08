@@ -16,6 +16,7 @@ from studiodesk.agent.retrieval import Retriever
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder
 from studiodesk.llm import LLMClient
+from studiodesk.llm.limits import GatedLLM, LLMConcurrencyGate
 from studiodesk.vectorstore import QdrantStore
 
 SERVICE_UNAVAILABLE_DETAIL = "Search is temporarily unavailable"
@@ -59,11 +60,15 @@ def get_retriever(
 
 
 def get_llm(request: Request) -> LLMClient:
-    """Return the LLM client built at startup, or 503 if none is configured."""
+    """Return the startup LLM client behind the app's concurrency gate (503 if none).
+
+    `app.state.llm` stays the raw client; the shared gate lives on `app.state.llm_gate`.
+    """
     llm: LLMClient | None = getattr(request.app.state, "llm", None)
     if llm is None:
         raise HTTPException(status_code=503, detail=LLM_NOT_CONFIGURED_DETAIL)
-    return llm
+    gate: LLMConcurrencyGate | None = getattr(request.app.state, "llm_gate", None)
+    return GatedLLM(llm, gate) if gate is not None else llm
 
 
 def get_proposal_store(request: Request) -> ProposalStore:
