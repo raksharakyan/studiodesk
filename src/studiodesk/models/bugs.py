@@ -106,6 +106,8 @@ class DuplicateCheck(BaseModel):
     verdict: DuplicateVerdict
     duplicate_of: str | None = None
     candidates: list[DuplicateCandidate] = Field(default_factory=list)
+    # Score from which a candidate counts as flagged even if the LLM said no.
+    auto_threshold: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class RoutingResult(BaseModel):

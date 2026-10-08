@@ -1,7 +1,8 @@
 """The fixed allowlist of GitHub labels StudioDesk may put on issues.
 
-Labels are derived only from enums (component, severity) plus a fixed base label, so no
-request or model text can introduce a label. `scripts/setup_issue_labels.py` creates
+Labels are derived only from enums (component, severity), a fixed base label and the
+server-derived `possible-duplicate` flag, so no request or model text can introduce a
+label. `scripts/setup_issue_labels.py` creates
 exactly these labels in the target repository.
 """
 
@@ -11,6 +12,7 @@ from typing import NamedTuple
 from studiodesk.models.documents import Component, Severity
 
 BASE_LABEL = "bug"
+POSSIBLE_DUPLICATE_LABEL = "possible-duplicate"
 
 _SEVERITY_COLOURS = {
     Severity.CRITICAL: "b60205",
@@ -20,6 +22,7 @@ _SEVERITY_COLOURS = {
 }
 _COMPONENT_COLOUR = "1d76db"
 _BASE_COLOUR = "d73a4a"
+_POSSIBLE_DUPLICATE_COLOUR = "cfd3d7"
 
 
 class LabelSpec(NamedTuple):
@@ -42,6 +45,11 @@ def severity_label(severity: Severity) -> str:
 
 LABEL_SPECS: tuple[LabelSpec, ...] = (
     LabelSpec(BASE_LABEL, _BASE_COLOUR, "Something isn't working"),
+    LabelSpec(
+        POSSIBLE_DUPLICATE_LABEL,
+        _POSSIBLE_DUPLICATE_COLOUR,
+        "StudioDesk found similar existing reports",
+    ),
     *(LabelSpec(component_label(c), _COMPONENT_COLOUR, f"Component: {c.value}") for c in Component),
     *(LabelSpec(severity_label(s), _SEVERITY_COLOURS[s], f"Severity: {s.value}") for s in Severity),
 )

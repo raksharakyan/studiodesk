@@ -39,7 +39,10 @@ def judge(is_duplicate: bool) -> object:
         return DuplicateJudgements(
             judgements=[
                 CandidateJudgement(
-                    candidate_id=doc_id, is_duplicate=is_duplicate, confidence=0.9, reason="r"
+                    candidate_id=doc_id,
+                    is_duplicate=is_duplicate,
+                    confidence=0.9,
+                    reason="MODEL-REASON-TEXT",
                 )
                 for doc_id in ids
             ]
@@ -164,3 +167,26 @@ def test_llm_backoff_returns_503_with_retry_after(
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "30"
     assert response.json() == {"detail": "The assistant is temporarily unavailable"}
+
+
+def test_possible_duplicate_is_labelled_with_server_written_line(
+    ingested_store: QdrantStore, fake_embedder: Embedder, github_api: FakeGitHubAPI
+) -> None:
+    llm = FakeLLM({DuplicateJudgements: judge(True)})  # type: ignore[dict-item]
+    clients = make_client(
+        ingested_store,
+        fake_embedder,
+        llm,
+        github_api,
+        dup_candidate_threshold=0.0,
+        dup_auto_threshold=0.999,
+    )
+    for client in clients:
+        body = client.post("/bugs/check", json=BUG_0002_PARAPHRASE).json()
+
+    assert body["verdict"] == "possible_duplicate"
+    preview = body["proposed_action"]["preview"]
+    assert "possible-duplicate" in preview["labels"]
+    top = body["candidates"][0]
+    assert f"Possible duplicates: {top['doc_id']} (score {top['score']:.2f})" in preview["body"]
+    assert top["reason"] not in preview["body"]  # model text never reaches the issue

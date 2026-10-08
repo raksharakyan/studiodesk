@@ -41,10 +41,14 @@ logger = logging.getLogger(__name__)
 
 
 def propose_issue(
-    report: NewBugReport, routing: RoutingResult, proposals: ProposalStore, repo: str
+    report: NewBugReport,
+    routing: RoutingResult,
+    duplicates: DuplicateCheck,
+    proposals: ProposalStore,
+    repo: str,
 ) -> ProposedAction:
     """Store the issue draft as a pending proposal and return its public view."""
-    draft = build_issue_draft(report, routing)
+    draft = build_issue_draft(report, routing, duplicates)
     proposal = proposals.create(draft)
     return ProposedAction(
         action_id=proposal.action_id,
@@ -88,7 +92,7 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
         proposed = None
         if duplicates.verdict is not DuplicateVerdict.DUPLICATE and github is not None:
             try:
-                proposed = propose_issue(body, routing, proposals, github.repo)
+                proposed = propose_issue(body, routing, duplicates, proposals, github.repo)
             except ProposalError as exc:
                 raise proposal_http_error(exc) from None
         logger.info(

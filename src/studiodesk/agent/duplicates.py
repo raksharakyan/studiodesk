@@ -85,7 +85,7 @@ def check_duplicates(
     hits = retriever.search_bug_reports(report.search_text, search_k, exclude_ids=exclude_ids)
     shortlisted = [hit for hit in hits if hit.score >= candidate_threshold]
     if not shortlisted:
-        return DuplicateCheck(verdict=DuplicateVerdict.NEW)
+        return DuplicateCheck(verdict=DuplicateVerdict.NEW, auto_threshold=auto_threshold)
     result = llm.structured(
         DUPLICATE_SYSTEM_PROMPT,
         build_duplicate_prompt(report.prompt_text(), [hit.chunk for hit in shortlisted]),
@@ -134,8 +134,14 @@ def decide_verdict(candidates: list[DuplicateCandidate], auto_threshold: float) 
     if confirmed:
         best = max(confirmed, key=lambda c: c.score)
         return DuplicateCheck(
-            verdict=DuplicateVerdict.DUPLICATE, duplicate_of=best.doc_id, candidates=candidates
+            verdict=DuplicateVerdict.DUPLICATE,
+            duplicate_of=best.doc_id,
+            candidates=candidates,
+            auto_threshold=auto_threshold,
         )
-    if any(c.is_duplicate or c.score >= auto_threshold for c in candidates):
-        return DuplicateCheck(verdict=DuplicateVerdict.POSSIBLE_DUPLICATE, candidates=candidates)
-    return DuplicateCheck(verdict=DuplicateVerdict.NEW, candidates=candidates)
+    verdict = (
+        DuplicateVerdict.POSSIBLE_DUPLICATE
+        if any(c.is_duplicate or c.score >= auto_threshold for c in candidates)
+        else DuplicateVerdict.NEW
+    )
+    return DuplicateCheck(verdict=verdict, candidates=candidates, auto_threshold=auto_threshold)

@@ -1,5 +1,8 @@
 """Create StudioDesk's label allowlist in the GitHub repository from Settings (idempotent).
 
+The allowlist (`studiodesk.actions.labels.LABEL_SPECS`) is `bug`, `possible-duplicate`,
+one `component:*` label per component and one `severity:*` label per severity.
+
 Reads GITHUB_TOKEN and GITHUB_REPO from the environment / `.env`. Lists the repository's
 existing labels (GET, paginated) and creates only the missing allowlisted ones (POST).
 Existing labels are never modified or deleted. Requests go only to api.github.com.
