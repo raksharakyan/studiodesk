@@ -1,6 +1,7 @@
 """Map internal failures to generic HTTP errors; details are logged, never returned."""
 
 import logging
+import math
 
 from fastapi import HTTPException
 
@@ -27,10 +28,18 @@ ISSUE_FAILED_DETAIL = "The issue could not be created"
 
 
 def llm_http_error(exc: LLMError) -> HTTPException:
-    """503 if the provider is unavailable, else 502 (refusal, truncation, bad output)."""
+    """503 if the provider is unavailable, else 502 (refusal, truncation, bad output).
+
+    A provider-requested wait is passed on as a `Retry-After` header on the 503.
+    """
     logger.warning("llm call failed", extra={"error": str(exc), "kind": type(exc).__name__})
     if isinstance(exc, LLMUnavailable):
-        return HTTPException(status_code=503, detail=LLM_UNAVAILABLE_DETAIL)
+        headers = (
+            {"Retry-After": str(max(math.ceil(exc.retry_after_s), 1))}
+            if exc.retry_after_s is not None
+            else None
+        )
+        return HTTPException(status_code=503, detail=LLM_UNAVAILABLE_DETAIL, headers=headers)
     return HTTPException(status_code=502, detail=LLM_FAILED_DETAIL)
 
 

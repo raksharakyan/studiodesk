@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Reasoning models spend part of this budget on reasoning tokens.
     llm_max_tokens: int = Field(default=4096, gt=0, le=32_000)
     llm_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    # Interactive routes: retry a transient failure at most this often, and only when the
+    # wait (Retry-After or backoff) is <= llm_max_retry_wait_s; longer waits fail fast (503).
+    llm_max_retries: int = Field(default=1, ge=0, le=3)
+    llm_max_retry_wait_s: float = Field(default=10.0, gt=0, le=60)
     # Server-side retry on a substitute model when the requested model declines.
     llm_refusal_fallback: bool = True
 

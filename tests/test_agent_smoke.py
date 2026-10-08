@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from fakes import FAKE_REPO, FakeGitHubAPI, FakeLLM
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder
+from studiodesk.llm import LLMUnavailable
 from studiodesk.main import create_app
 from studiodesk.models.answer import LLMAnswer
 from studiodesk.models.bugs import CandidateJudgement, DuplicateJudgements
@@ -151,3 +152,15 @@ def test_new_bug_confirm_files_issue_once(
     assert payload == action["preview"]  # confirm sends exactly the stored draft
     assert "@team" not in str(payload["title"])
     assert "bug" in action["preview"]["labels"]
+
+
+def test_llm_backoff_returns_503_with_retry_after(
+    ingested_store: QdrantStore, fake_embedder: Embedder, github_api: FakeGitHubAPI
+) -> None:
+    llm = FakeLLM({LLMAnswer: LLMUnavailable("rate limited", retry_after_s=29.2)})
+    for client in make_client(ingested_store, fake_embedder, llm, github_api):
+        response = client.post("/ask", json={"question": "save corrupted after cryo sleep"})
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "30"
+    assert response.json() == {"detail": "The assistant is temporarily unavailable"}

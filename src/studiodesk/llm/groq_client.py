@@ -11,16 +11,17 @@ The default model `openai/gpt-oss-120b` is a reasoning model: `reasoning_effort`
 settings and `include_reasoning=False` keeps reasoning out of the response; only
 `message.content` is ever parsed.
 
-Sampling uses a low temperature from settings, `max_tokens` is capped from settings, and
-the SDK client has the configured timeout and `max_retries=2`. Rate limits are handled
-only by the SDK's own retries (which honour `Retry-After` up to 60 s); the adapter never
-sleeps. The API host is pinned so a `GROQ_BASE_URL` in the environment cannot redirect
-traffic. Prompts and model output are never logged; only model, finish reason and token
-counts are.
+Sampling uses a low temperature from settings, `max_tokens` is capped from settings and
+each request carries the configured timeout. Transient failures follow the capped retry
+policy in `studiodesk.llm.base` (SDK retries are off). The API host is pinned so a
+`GROQ_BASE_URL` in the environment cannot redirect traffic. Prompts and model output are
+never logged; only model, finish reason and token counts are.
 """
 
 import json
 import logging
+import time
+from collections.abc import Callable
 from typing import Literal
 
 import groq
@@ -32,7 +33,8 @@ from studiodesk.llm.base import (
     LLMInvalidOutput,
     LLMTruncated,
     LLMUnavailable,
-    error_name,
+    call_with_retry,
+    unavailable_from,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +42,6 @@ logger = logging.getLogger(__name__)
 ReasoningEffort = Literal["low", "medium", "high"]
 
 GROQ_BASE_URL = "https://api.groq.com"
-LLM_MAX_RETRIES = 2
 MAX_ERRORS_IN_RETRY = 10
 
 SCHEMA_INSTRUCTIONS = (
@@ -77,6 +78,10 @@ class GroqLLM:
         max_tokens: int,
         temperature: float = 0.1,
         reasoning_effort: ReasoningEffort = "medium",
+        timeout_s: float = 60.0,
+        max_retries: int = 1,
+        max_retry_wait_s: float = 10.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """Wrap an SDK client; the caller owns it (see `close`).
 
@@ -86,16 +91,24 @@ class GroqLLM:
             max_tokens: Upper bound on generated tokens per call.
             temperature: Sampling temperature (keep it low for consistent judgements).
             reasoning_effort: Reasoning effort, sent with `include_reasoning=False`.
+            timeout_s: Per-request timeout.
+            max_retries: Retries of a transient failure (see `call_with_retry`).
+            max_retry_wait_s: Longest wait before a retry; longer waits fail fast.
+            sleep: Sleep function (injectable for tests).
         """
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._reasoning_effort: ReasoningEffort = reasoning_effort
+        self._timeout_s = timeout_s
+        self._max_retries = max_retries
+        self._max_retry_wait_s = max_retry_wait_s
+        self._sleep = sleep
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "GroqLLM":
-        """Build the SDK client from settings (fixed API host, timeout, max 2 retries).
+        """Build the SDK client from settings (fixed API host, SDK retries off).
 
         Raises:
             LLMUnavailable: if no `groq_api_key` is configured.
@@ -106,7 +119,7 @@ class GroqLLM:
             api_key=settings.groq_api_key.get_secret_value(),
             base_url=GROQ_BASE_URL,
             timeout=settings.llm_timeout_s,
-            max_retries=LLM_MAX_RETRIES,
+            max_retries=0,
         )
         return cls(
             client,
@@ -114,6 +127,9 @@ class GroqLLM:
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
             reasoning_effort=settings.llm_reasoning_effort,
+            timeout_s=settings.llm_timeout_s,
+            max_retries=settings.llm_max_retries,
+            max_retry_wait_s=settings.llm_max_retry_wait_s,
         )
 
     def close(self) -> None:
@@ -148,13 +164,23 @@ class GroqLLM:
             ) from None
 
     def _complete(self, system: str, user_content: str) -> str:
-        """Send one JSON-mode request and return the message text."""
+        """Send one JSON-mode request (with the capped retry policy); return the text."""
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ]
+        completion = call_with_retry(
+            lambda: self._request(messages),
+            max_retries=self._max_retries,
+            max_wait_s=self._max_retry_wait_s,
+            sleep=self._sleep,
+        )
+        return _message_text(completion)
+
+    def _request(self, messages: list[ChatCompletionMessageParam]) -> ChatCompletion:
+        """One HTTP request, every SDK error mapped to `LLMUnavailable`."""
         try:
-            completion = self._client.chat.completions.create(
+            return self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 response_format={"type": "json_object"},
@@ -162,6 +188,7 @@ class GroqLLM:
                 max_completion_tokens=self._max_tokens,
                 reasoning_effort=self._reasoning_effort,
                 include_reasoning=False,
+                timeout=self._timeout_s,
             )
         except (
             groq.RateLimitError,
@@ -170,8 +197,7 @@ class GroqLLM:
             groq.APIConnectionError,
             groq.APIError,
         ) as exc:
-            raise LLMUnavailable(f"groq call failed: {error_name(exc)}") from exc
-        return _message_text(completion)
+            raise unavailable_from("groq", exc, (groq.APIConnectionError,)) from exc
 
 
 def _message_text(completion: ChatCompletion) -> str:
