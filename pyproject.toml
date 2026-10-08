@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI support and QA agent for game studios: RAG over bug reports, crash logs and patch notes."
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=1.12.1",
     "fastapi>=0.142.2",
     "httpx>=0.28.1",
     "pydantic>=2.13.5",
@@ -50,6 +51,7 @@ addopts = "-ra"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
     "mypy>=2.4.0",
     "pip-audit>=2.10.1",
     "pytest>=9.1.1",
