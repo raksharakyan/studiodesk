@@ -3,6 +3,9 @@
 Building the app is cheap: the embedding model, the Qdrant client, the LLM client and the
 outbound HTTP client are created in the lifespan startup (not in `create_app`), and only
 when they were not injected. Resources created there are closed again on shutdown.
+
+Run as a single process: the rate limiter and the proposal store both keep their state in
+process memory (see `studiodesk.api.ratelimit` and `studiodesk.actions.proposals`).
 """
 
 import logging

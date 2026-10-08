@@ -11,9 +11,12 @@ not revealed without the token), already confirmed/cancelled -> 409, expired -> 
 full -> 503. Records are kept for one extra TTL after expiry so late or repeated requests
 still get 409/410 rather than 404, then purged.
 
-`InMemoryProposalStore` is per process (like the rate limiter); with several workers a
-confirm must reach the worker that created the proposal. A shared store can implement
-the same `ProposalStore` protocol later.
+`InMemoryProposalStore` keeps proposals in process memory, like the rate limiter in
+`studiodesk.api.ratelimit`: with N uvicorn workers or N replicas, a confirm only succeeds
+on the process that created the proposal (elsewhere it is a 404), and a restart drops all
+pending proposals (users simply re-run `/bugs/check`). That is acceptable for the current
+single-process deployment; scaling out needs a shared backend (e.g. Redis with per-key
+TTLs and an atomic compare-and-set for `claim`) behind the same `ProposalStore` protocol.
 """
 
 import hashlib
