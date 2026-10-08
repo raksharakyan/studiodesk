@@ -108,7 +108,9 @@ def main() -> int:
     if settings.github_token is None or not settings.github_repo:
         print("error: set GITHUB_TOKEN and GITHUB_REPO (see .env.example)", file=sys.stderr)
         return 2
-    with httpx.Client(timeout=settings.github_timeout_s, follow_redirects=False) as http:
+    with httpx.Client(
+        timeout=settings.github_timeout_s, follow_redirects=False, trust_env=False
+    ) as http:
         try:
             created, kept = sync_labels(http, settings.github_repo, settings.github_token)
         except LabelSyncError as exc:

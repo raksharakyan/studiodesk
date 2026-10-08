@@ -69,8 +69,12 @@ def _build_llm(settings: Settings, stack: ExitStack) -> LLMClient | None:
 def _build_outbound(
     settings: Settings, injected: Injected, stack: ExitStack
 ) -> tuple[GitHubIssues | None, SlackNotifier]:
-    """Create GitHub/Slack clients sharing one outbound httpx client (no redirects)."""
-    http = httpx.Client(follow_redirects=False, timeout=settings.github_timeout_s)
+    """Create GitHub/Slack clients sharing one outbound httpx client.
+
+    No redirects, and `trust_env=False` so HTTP(S)_PROXY, NETRC and other environment
+    settings cannot reroute or add credentials to calls to GitHub or Slack.
+    """
+    http = httpx.Client(follow_redirects=False, timeout=settings.github_timeout_s, trust_env=False)
     stack.callback(http.close)
     github = injected.github
     if github is None and settings.github_token is not None and settings.github_repo:
