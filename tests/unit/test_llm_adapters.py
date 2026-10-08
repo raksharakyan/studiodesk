@@ -7,6 +7,7 @@ mock transport, so the real base URL the adapter chose is what the handler sees.
 
 import json
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -16,6 +17,7 @@ import httpx
 import httpx2
 import pytest
 
+from fakes import FakeLLM
 from studiodesk.config import Settings
 from studiodesk.llm import (
     AnthropicLLM,
@@ -28,8 +30,9 @@ from studiodesk.llm import (
 )
 from studiodesk.llm import anthropic_client as anthropic_module
 from studiodesk.llm import groq_client as groq_module
-from studiodesk.llm.base import call_with_retry, parse_retry_after
+from studiodesk.llm.base import call_with_retry, parse_retry_after, remaining_s
 from studiodesk.llm.groq_client import RETRY_INSTRUCTIONS, SCHEMA_INSTRUCTIONS
+from studiodesk.llm.limits import GatedLLM, LLMConcurrencyGate
 from studiodesk.models.answer import LLMAnswer
 
 VALID = '{"answer": "ok", "cited_ids": ["BUG-0001"], "insufficient_context": false}'
@@ -582,3 +585,234 @@ def test_call_with_retry_does_not_retry_non_retryable_or_zero_retries() -> None:
     with pytest.raises(LLMUnavailable):
         call_with_retry(fail_retryable, max_retries=0, max_wait_s=10, sleep=lambda s: None)
     assert len(attempts) == 2
+
+
+# --------------------------------------------------------------------------- deadline (f0cc331)
+
+
+class FakeMonotonic:
+    """Injectable monotonic clock; `sleep` advances it."""
+
+    def __init__(self, start: float = 0.0, step: float = 0.0) -> None:
+        self.t = start
+        self.step = step  # added on every read (to simulate time passing between reads)
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        value = self.t
+        self.t += self.step
+        return value
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+class ClockedRecorder(Recorder):
+    """Recorder that advances a fake clock by `cost` seconds per request."""
+
+    def __init__(self, script: list[Any], clock: FakeMonotonic, cost: float) -> None:
+        super().__init__(script)
+        self.clock = clock
+        self.cost = cost
+
+    def __call__(self, request: Any) -> Any:
+        self.clock.t += self.cost
+        return super().__call__(request)
+
+
+def _clocked(provider: str, script: list[Any], clock: FakeMonotonic, cost: float, **kw: Any):
+    rec = ClockedRecorder(script, clock, cost)
+    if provider == "groq":
+        client: Any = groq.Groq(
+            api_key=FAKE_KEY,
+            base_url="https://api.groq.com",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(rec)),
+        )
+        cls: Any = GroqLLM
+    else:
+        client = anthropic.Anthropic(
+            api_key=FAKE_KEY,
+            base_url="https://api.anthropic.com",
+            max_retries=0,
+            http_client=httpx2.Client(transport=httpx2.MockTransport(rec)),
+        )
+        cls = AnthropicLLM
+    params: dict[str, Any] = {"model": "m", "max_tokens": 10, "timeout_s": 30.0}
+    params.update(kw)
+    return cls(client, sleep=clock.sleep, monotonic=clock, **params), rec
+
+
+def _resp(provider: str, status: int, **kw: Any) -> Any:
+    module: Any = httpx if provider == "groq" else httpx2
+    return module.Response(status, **kw)
+
+
+def _ok(provider: str) -> Any:
+    payload = groq_completion() if provider == "groq" else anthropic_message()
+    return _resp(provider, 200, json=payload)
+
+
+PROVIDERS = ["groq", "anthropic"]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_rate_limit_retry_never_crosses_deadline(provider: str) -> None:
+    clock = FakeMonotonic()
+    limited = _resp(provider, 429, headers={"retry-after": "2"}, json={"error": {}})
+    # Each request costs 8 s; 8 + 2 >= the 10 s deadline, so no retry is started.
+    llm, rec = _clocked(provider, [limited, _ok(provider)], clock, 8, request_deadline_s=10)
+
+    with pytest.raises(LLMUnavailable) as info:
+        llm.structured("S", "U", LLMAnswer)
+
+    assert len(rec.requests) == 1
+    assert clock.sleeps == []
+    assert info.value.retry_after_s == 2.0
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_rate_limit_retry_within_deadline_and_timeout_capped(provider: str) -> None:
+    clock = FakeMonotonic()
+    limited = _resp(provider, 429, headers={"retry-after": "1"}, json={"error": {}})
+    llm, rec = _clocked(provider, [limited, _ok(provider)], clock, 4, request_deadline_s=12)
+
+    assert llm.structured("S", "U", LLMAnswer).answer == "ok"
+
+    assert clock.sleeps == [1.0]
+    timeouts = [r.extensions["timeout"]["read"] for r in rec.requests]
+    # 30 s per-request timeout, capped by what is left of the 12 s deadline: 12, then 12-4-1.
+    assert timeouts == [12.0, 7.0]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_timeout_not_raised_above_configured_timeout(provider: str) -> None:
+    clock = FakeMonotonic()
+    llm, rec = _clocked(provider, [_ok(provider)], clock, 0, timeout_s=5, request_deadline_s=75)
+    llm.structured("S", "U", LLMAnswer)
+    assert rec.requests[0].extensions["timeout"]["read"] == 5.0
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_already_expired_deadline_makes_no_request(provider: str) -> None:
+    clock = FakeMonotonic(step=100.0)  # every read jumps past the 75 s deadline
+    llm, rec = _clocked(provider, [_ok(provider)], clock, 0, request_deadline_s=75)
+
+    with pytest.raises(LLMUnavailable, match="deadline"):
+        llm.structured("S", "U", LLMAnswer)
+
+    assert rec.requests == []
+
+
+def test_groq_no_schema_retry_after_deadline() -> None:
+    clock = FakeMonotonic()
+    bad = httpx.Response(200, json=groq_completion('{"x": 1}'))
+    llm, rec = _clocked("groq", [bad, _ok("groq")], clock, 11, request_deadline_s=10)
+
+    with pytest.raises(LLMInvalidOutput, match="deadline"):
+        llm.structured("S", "U", LLMAnswer)
+
+    assert len(rec.requests) == 1
+
+
+def test_groq_schema_retry_gets_remaining_time_only() -> None:
+    clock = FakeMonotonic()
+    bad = httpx.Response(200, json=groq_completion('{"x": 1}'))
+    llm, rec = _clocked("groq", [bad, _ok("groq")], clock, 6, request_deadline_s=10)
+
+    assert llm.structured("S", "U", LLMAnswer).answer == "ok"
+    assert [r.extensions["timeout"]["read"] for r in rec.requests] == [10.0, 4.0]
+
+
+def test_call_with_retry_respects_deadline() -> None:
+    def failing() -> None:
+        raise LLMUnavailable("x", retryable=True)
+
+    sleeps: list[float] = []
+    with pytest.raises(LLMUnavailable):
+        call_with_retry(
+            failing,
+            max_retries=3,
+            max_wait_s=10,
+            sleep=sleeps.append,
+            deadline=5.4,
+            monotonic=lambda: 5.0,  # 5.0 + 0.5 backoff >= 5.4
+        )
+    assert sleeps == []
+
+    calls: list[int] = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise LLMUnavailable("x", retryable=True)
+        return "ok"
+
+    assert (
+        call_with_retry(
+            flaky,
+            max_retries=1,
+            max_wait_s=10,
+            sleep=sleeps.append,
+            deadline=6.0,
+            monotonic=lambda: 5.0,
+        )
+        == "ok"
+    )
+    assert sleeps == [0.5]
+
+
+def test_remaining_s() -> None:
+    assert remaining_s(10.0, lambda: 4.0) == 6.0
+    with pytest.raises(LLMUnavailable):
+        remaining_s(10.0, lambda: 10.0)
+
+
+# --------------------------------------------------------------------------- concurrency gate
+
+
+def test_gate_fails_fast_when_saturated_and_releases_on_error() -> None:
+    gate = LLMConcurrencyGate(1, acquire_timeout_s=0, busy_retry_after_s=5)
+    gate.acquire()
+    with pytest.raises(LLMUnavailable) as info:
+        gate.acquire()
+    assert info.value.retry_after_s == 5
+    gate.release()
+
+    failing = GatedLLM(FakeLLM({LLMAnswer: LLMTruncated("x")}), gate)
+    for _ in range(3):  # each failure gives its slot back
+        with pytest.raises(LLMTruncated):
+            failing.structured("S", "U", LLMAnswer)
+    ok_llm = GatedLLM(
+        FakeLLM({LLMAnswer: LLMAnswer(answer="a", cited_ids=[], insufficient_context=False)}), gate
+    )
+    assert ok_llm.structured("S", "U", LLMAnswer).answer == "a"
+    ok_llm.close()
+
+
+def test_gate_waits_for_a_slot_within_timeout() -> None:
+    gate = LLMConcurrencyGate(1, acquire_timeout_s=5, busy_retry_after_s=5)
+    gate.acquire()
+    timer = threading.Timer(0.05, gate.release)
+    timer.start()
+    gate.acquire()  # succeeds once the holder releases
+    gate.release()
+    timer.join()
+
+
+@pytest.mark.parametrize(("conc", "wait", "retry"), [(0, 1.0, 5.0), (1, -1.0, 5.0), (1, 1.0, 0.0)])
+def test_gate_rejects_invalid_settings(conc: int, wait: float, retry: float) -> None:
+    with pytest.raises(ValueError):
+        LLMConcurrencyGate(conc, acquire_timeout_s=wait, busy_retry_after_s=retry)
+
+
+def test_gate_from_settings() -> None:
+    gate = LLMConcurrencyGate.from_settings(
+        Settings(_env_file=None, llm_max_concurrency=2, llm_concurrency_wait_s=0)
+    )
+    gate.acquire()
+    gate.acquire()
+    with pytest.raises(LLMUnavailable) as info:
+        gate.acquire()
+    assert info.value.retry_after_s == 5

@@ -157,6 +157,7 @@ def _route_http(monkeypatch: pytest.MonkeyPatch, script: ModuleType, api: FakeLa
 
     def client(**kwargs: Any) -> httpx.Client:
         assert kwargs.get("follow_redirects") is False
+        assert kwargs.get("trust_env") is False  # no proxy/netrc from the environment
         return original(transport=httpx.MockTransport(api), **kwargs)
 
     monkeypatch.setattr(script.httpx, "Client", client)

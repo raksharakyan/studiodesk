@@ -23,6 +23,7 @@ from studiodesk.data.loader import Dataset
 from studiodesk.embeddings import Embedder
 from studiodesk.llm import GroqLLM, LLMInvalidOutput, LLMRefusal, LLMTruncated, LLMUnavailable
 from studiodesk.main import create_app
+from studiodesk.models.actions import IssueDraft
 from studiodesk.models.answer import LLMAnswer
 from studiodesk.models.bugs import CandidateJudgement, DuplicateJudgements
 from studiodesk.vectorstore import QdrantStore, VectorStoreError
@@ -40,6 +41,12 @@ ENV_VARS = (
     "BUGS_RATE_LIMIT",
     "ACTIONS_RATE_LIMIT",
     "SEARCH_RATE_LIMIT",
+    "APP_ENV",
+    "ACTIONS_ENABLED",
+    "ACTIONS_MAX_PER_DAY",
+    "LLM_MAX_CONCURRENCY",
+    "LLM_CONCURRENCY_WAIT_S",
+    "LLM_BUSY_RETRY_AFTER_S",
 )
 
 NOVEL_BUG: dict[str, Any] = {
@@ -88,6 +95,7 @@ class Api:
     github: FakeGitHubAPI
     slack: FakeSlack
     clock: Clock
+    proposals: InMemoryProposalStore
 
     def check(self, body: dict[str, Any] | None = None) -> httpx.Response:
         return self.client.post("/bugs/check", json=body or NOVEL_BUG)
@@ -125,6 +133,7 @@ def make_api(ingested_store: QdrantStore, fake_embedder: Embedder) -> Iterator[M
         slack_webhook: str | None = None,
         slack_status: int = 200,
         store: Any = None,
+        clock_start: datetime | None = None,
         **overrides: Any,
     ) -> Api:
         settings = Settings(_env_file=None, app_env="test", **overrides)
@@ -134,6 +143,14 @@ def make_api(ingested_store: QdrantStore, fake_embedder: Embedder) -> Iterator[M
         slack_http = httpx.Client(transport=httpx.MockTransport(slack))
         stack.callback(slack_http.close)
         clock = Clock()
+        if clock_start is not None:
+            clock.now = clock_start
+        store_ = InMemoryProposalStore(
+            settings.action_ttl_s,
+            max_pending=settings.action_max_pending,
+            max_per_day=settings.actions_max_per_day,
+            clock=clock,
+        )
         app = create_app(
             settings,
             embedder=fake_embedder,
@@ -141,12 +158,10 @@ def make_api(ingested_store: QdrantStore, fake_embedder: Embedder) -> Iterator[M
             llm=fake_llm,
             github=_github_client(github_api) if github else None,
             slack=SlackNotifier(slack_http, SecretStr(slack_webhook) if slack_webhook else None, 5),
-            proposals=InMemoryProposalStore(
-                settings.action_ttl_s, max_pending=settings.action_max_pending, clock=clock
-            ),
+            proposals=store_,
         )
         client = stack.enter_context(TestClient(app))
-        return Api(client, fake_llm, github_api, slack, clock)
+        return Api(client, fake_llm, github_api, slack, clock, store_)
 
     yield build
     stack.close()
@@ -794,3 +809,221 @@ def test_non_finite_llm_confidence_is_not_a_500(make_api: MakeApi, raw: float) -
     response = api.check()
     assert response.status_code == 200
     assert all(c["confidence"] == 0.0 for c in response.json()["candidates"])
+
+
+# --------------------------------------------------------------------------- kill switch
+
+DRAFT = IssueDraft(title="Stored draft title", body="Stored body", labels=["bug"])
+
+
+def test_kill_switch_bugs_check_returns_preview_only(make_api: MakeApi) -> None:
+    api = make_api(actions_enabled=False, **NO_CANDIDATES)
+
+    response = api.check()
+
+    assert response.status_code == 200
+    action = response.json()["proposed_action"]
+    assert action["action_id"] is None
+    assert action["confirm_token"] is None
+    assert action["expires_at"] is None
+    assert action["actions_disabled_reason"] == "Issue filing is disabled"
+    assert action["preview"]["title"] == NOVEL_BUG["title"]
+    assert action["repo"] == FAKE_REPO
+    assert api.github.requests == []
+    assert vars(api.proposals)["_records"] == {}  # nothing stored
+
+
+def test_kill_switch_confirm_is_503_without_consuming_token(make_api: MakeApi) -> None:
+    api = make_api(actions_enabled=False, **NO_CANDIDATES)
+    proposal = api.proposals.create(DRAFT)
+    action = {"action_id": proposal.action_id, "confirm_token": proposal.confirm_token}
+
+    response = api.confirm(action)
+    unknown = api.client.post(f"/actions/{'Q' * 22}/confirm", json={"confirm_token": "q" * 43})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Issue filing is disabled"}
+    assert unknown.status_code == 503  # checked before any token lookup
+    assert api.github.requests == [] and api.slack.requests == []
+    # Token not consumed: cancel still works with it.
+    cancelled = api.cancel(action)
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"status": "cancelled"}
+
+
+def test_kill_switch_token_still_claimable_in_store(make_api: MakeApi) -> None:
+    api = make_api(actions_enabled=False, **NO_CANDIDATES)
+    proposal = api.proposals.create(DRAFT)
+    api.confirm({"action_id": proposal.action_id, "confirm_token": proposal.confirm_token})
+    assert api.proposals.claim(proposal.action_id, proposal.confirm_token) == DRAFT
+
+
+# --------------------------------------------------------------------------- daily cap
+
+
+def test_daily_cap_blocks_confirm_and_keeps_token_until_rollover(make_api: MakeApi) -> None:
+    api = make_api(
+        actions_max_per_day=1,
+        clock_start=datetime(2026, 1, 1, 23, 55, tzinfo=UTC),
+        **NO_CANDIDATES,
+    )
+    first, second = api.propose(), api.propose()
+
+    assert api.confirm(first).status_code == 200
+    limited = api.confirm(second)
+    assert limited.status_code == 503
+    assert limited.json() == {"detail": "Daily issue limit reached"}
+    assert len(api.github.requests) == 1
+
+    preview = api.check().json()["proposed_action"]
+    assert preview["actions_disabled_reason"] == "Daily issue limit reached"
+    assert preview["action_id"] is None and preview["confirm_token"] is None
+    assert preview["preview"]["title"] == NOVEL_BUG["title"]
+
+    api.clock.now = datetime(2026, 1, 2, 0, 1, tzinfo=UTC)  # UTC rollover, within TTL
+    assert api.confirm(second).status_code == 200
+    assert len(api.github.requests) == 2
+
+
+def test_github_failure_releases_daily_slot(make_api: MakeApi) -> None:
+    api = make_api(actions_max_per_day=1, github_status=500, **NO_CANDIDATES)
+    first, second, third = api.propose(), api.propose(), api.propose()
+
+    assert api.confirm(first).status_code == 502  # not counted
+    api.github.status_code = 201
+    assert api.confirm(second).status_code == 200  # counted
+    assert api.confirm(third).status_code == 503
+    assert len(api.github.requests) == 2
+
+
+def test_concurrent_confirms_never_exceed_daily_cap(make_api: MakeApi) -> None:
+    api = make_api(
+        actions_max_per_day=3,
+        actions_rate_limit="100/minute",
+        bugs_rate_limit="100/minute",
+        **NO_CANDIDATES,
+    )
+    actions = [api.propose() for _ in range(10)]
+    barrier = threading.Barrier(len(actions))
+    statuses: list[int] = []
+    lock = threading.Lock()
+
+    def worker(action: dict[str, Any]) -> None:
+        barrier.wait()
+        status = api.confirm(action).status_code
+        with lock:
+            statuses.append(status)
+
+    threads = [threading.Thread(target=worker, args=(a,)) for a in actions]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert statuses.count(200) == 3
+    assert statuses.count(503) == 7
+    assert len(api.github.requests) == 3
+
+
+# --------------------------------------------------------------------------- LLM gate
+
+
+def test_saturated_llm_gate_returns_503_with_retry_after(make_api: MakeApi) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking(system: str, user: str) -> LLMAnswer:
+        entered.set()
+        assert release.wait(10)
+        return ANSWER
+
+    api = make_api({LLMAnswer: blocking}, llm_max_concurrency=1, llm_concurrency_wait_s=0.2)
+    first: list[int] = []
+    holder = threading.Thread(
+        target=lambda: first.append(api.client.post("/ask", json=QUESTION).status_code)
+    )
+    holder.start()
+    try:
+        assert entered.wait(10)
+        busy = api.client.post("/ask", json=QUESTION)
+    finally:
+        release.set()
+        holder.join(10)
+
+    assert busy.status_code == 503
+    assert busy.headers["Retry-After"] == "5"
+    assert busy.json() == {"detail": "The assistant is temporarily unavailable"}
+    assert first == [200]
+    assert api.client.post("/ask", json=QUESTION).status_code == 200  # slot was released
+
+
+def test_llm_gate_slot_released_when_llm_raises(make_api: MakeApi) -> None:
+    api = make_api(
+        {LLMAnswer: LLMInvalidOutput("bad")}, llm_max_concurrency=1, llm_concurrency_wait_s=0
+    )
+    statuses = [api.client.post("/ask", json=QUESTION).status_code for _ in range(3)]
+    assert statuses == [502, 502, 502]
+
+
+# --------------------------------------------------------------------------- hostile issue body
+
+
+def test_preview_equals_github_payload_for_hostile_report(make_api: MakeApi) -> None:
+    api = make_api(**NO_CANDIDATES)
+    hostile = {
+        **NOVEL_BUG,
+        "title": "Crash #12 in org/repo#12 for @team",
+        "description": "```\n## Injected heading\n```\n<!-- hidden --> [x](https://evil.example)",
+        "steps_to_reproduce": ["````", "#5 @x"],
+    }
+    action = api.check(hostile).json()["proposed_action"]
+
+    assert api.confirm(action).status_code == 200
+    assert api.github.payloads() == [action["preview"]]
+    assert "#12" not in action["preview"]["title"]
+    assert "@team" not in action["preview"]["title"]
+
+
+# --------------------------------------------------------------------------- outbound client
+
+
+def test_real_built_outbound_client_ignores_environment(
+    ingested_store: QdrantStore, fake_embedder: Embedder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        github_token=GITHUB_TOKEN,
+        github_repo=FAKE_REPO,
+        slack_webhook_url=WEBHOOK,
+    )
+    app = create_app(settings, embedder=fake_embedder, store=ingested_store, llm=FakeLLM({}))
+
+    with TestClient(app):
+        # White-box: the shared client is private; this is the only way to observe it offline.
+        github_http = vars(app.state.github)["_http"]
+        slack_http = vars(app.state.slack)["_http"]
+        assert github_http is slack_http
+        assert github_http.trust_env is False
+        assert github_http.follow_redirects is False
+
+
+def test_unexpected_error_during_creation_releases_daily_slot(
+    make_api: MakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = make_api(actions_max_per_day=1, **NO_CANDIDATES)
+    first, second = api.propose(), api.propose()
+    github = api.client.app.state.github  # type: ignore[attr-defined]
+
+    def boom(draft: IssueDraft) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(github, "create", boom)
+    with pytest.raises(RuntimeError):
+        api.confirm(first)
+    monkeypatch.undo()
+
+    assert api.proposals.daily_limit_reached() is False
+    assert api.confirm(second).status_code == 200
+    assert api.confirm(first).status_code == 409  # token was consumed, not retried

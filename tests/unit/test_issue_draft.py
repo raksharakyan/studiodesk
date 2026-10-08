@@ -1,5 +1,7 @@
 """Issue drafts are built only from report fields, routing and our own ids/scores."""
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -218,3 +220,106 @@ def test_allowed_labels_filters_and_dedupes() -> None:
 def test_issue_draft_rejects_labels_outside_allowlist(labels: list[str]) -> None:
     with pytest.raises(ValidationError, match="allowlist"):
         IssueDraft(title="t", body="b", labels=labels)
+
+
+# --------------------------------------------------------------------------- fencing (b3dcd0e)
+
+
+def parse_fences(body: str) -> tuple[list[str], str]:
+    """Minimal CommonMark backtick-fence parser: (block contents, text outside blocks).
+
+    An opening fence is up to 3 spaces then >= 3 backticks and an info string without
+    backticks; it closes on a line of up to 3 spaces and at least as many backticks only.
+    An unclosed fence runs to the end of the document.
+    """
+    blocks: list[str] = []
+    outside: list[str] = []
+    lines = body.split("\n")
+    i = 0
+    while i < len(lines):
+        opening = re.match(r"^ {0,3}(`{3,})[^`]*$", lines[i])
+        if not opening:
+            outside.append(lines[i])
+            i += 1
+            continue
+        size = len(opening.group(1))
+        content: list[str] = []
+        i += 1
+        while i < len(lines) and not re.match(rf"^ {{0,3}}`{{{size},}}\s*$", lines[i]):
+            content.append(lines[i])
+            i += 1
+        i += 1  # skip the closing fence
+        blocks.append("\n".join(content))
+    return blocks, "\n".join(outside)
+
+
+def test_every_user_field_is_its_own_fenced_block() -> None:
+    draft = build_issue_draft(report(), ROUTING, check(DuplicateVerdict.NEW))
+
+    blocks, outside = parse_fences(draft.body)
+
+    assert blocks == [
+        "The free camera ignores the inverted Y setting.",
+        "1. Enable inverted Y\n2. Open photo mode",
+        "Camera is inverted",
+        "Camera is not inverted",
+    ]
+    for heading in ("## Description", "## Steps to reproduce", "## Environment", "## Triage"):
+        assert heading in outside
+
+
+HOSTILE = [
+    "```\n## Injected heading\n[x](https://evil.example)\n```",
+    "````\n#5 escaped?\n````\n<!-- comment -->",
+    "inline ``` and ```` and ````` runs\n```",
+    "first line\n   ```\nindented closer then <img src=x onerror=alert(1)>",
+    "~~~\n#5 @x <!-- hidden --> [link](https://evil.example)\n~~~",
+    "ends with backticks ```",
+]
+INERT_MARKERS = ("Injected heading", "evil.example", "#5", "<!--", "<img", "@x", "escaped?")
+
+
+@pytest.mark.parametrize("text", HOSTILE)
+@pytest.mark.parametrize("field", ["description", "expected", "actual", "steps"])
+def test_hostile_fields_cannot_escape_their_fence(text: str, field: str) -> None:
+    overrides: dict[str, object] = (
+        {"steps_to_reproduce": [text]} if field == "steps" else {field: text}
+    )
+    draft = build_issue_draft(report(**overrides), ROUTING, check(DuplicateVerdict.NEW))
+
+    blocks, outside = parse_fences(draft.body)
+
+    assert len(blocks) == 4  # one per field, none split or merged
+    expected = neutralise_mentions(f"1. {text}" if field == "steps" else text)
+    assert expected in blocks
+    for marker in INERT_MARKERS:
+        assert marker not in outside
+    assert outside.rstrip().endswith(FOOTER)
+
+
+@pytest.mark.parametrize(
+    ("text", "fence"),
+    [("a ``` b", "````"), ("a ```` b", "`````"), ("no backticks", "```"), ("one ` two ``", "```")],
+)
+def test_fence_is_longer_than_any_backtick_run(text: str, fence: str) -> None:
+    draft = build_issue_draft(report(description=text), ROUTING, check(DuplicateVerdict.NEW))
+    assert f"## Description\n{fence}text\n{text}\n{fence}\n" in draft.body
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Crash after #12 load", f"Crash after #{ZERO_WIDTH_JOINER}12 load"),
+        ("See org/repo#12 again", f"See org/repo#{ZERO_WIDTH_JOINER}12 again"),
+        ("ping @team on #3", f"ping @{ZERO_WIDTH_JOINER}team on #{ZERO_WIDTH_JOINER}3"),
+        ("Colour #fff and C# code", "Colour #fff and C# code"),
+    ],
+)
+def test_title_breaks_issue_refs_and_mentions(title: str, expected: str) -> None:
+    draft = build_issue_draft(report(title=title), ROUTING, check(DuplicateVerdict.NEW))
+    assert draft.title == expected
+
+
+def test_title_cap_holds_with_ref_expansion() -> None:
+    draft = build_issue_draft(report(title="#1" * 100), ROUTING, check(DuplicateVerdict.NEW))
+    assert len(draft.title) == ISSUE_TITLE_MAX_CHARS

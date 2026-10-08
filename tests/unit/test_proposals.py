@@ -9,6 +9,7 @@ import pytest
 from studiodesk.actions.proposals import (
     InMemoryProposalStore,
     ProposalCapacityError,
+    ProposalDailyLimitError,
     ProposalExpiredError,
     ProposalNotFoundError,
     ProposalUsedError,
@@ -166,3 +167,118 @@ def test_concurrent_claims_succeed_exactly_once() -> None:
 def test_invalid_construction(ttl: int, cap: int) -> None:
     with pytest.raises(ValueError):
         InMemoryProposalStore(ttl, max_pending=cap)
+
+
+# --------------------------------------------------------------------------- daily cap
+
+
+def capped(clock: Clock, n: int) -> InMemoryProposalStore:
+    return InMemoryProposalStore(900, max_pending=100, max_per_day=n, clock=clock)
+
+
+def test_daily_cap_blocks_n_plus_one_and_keeps_proposal_pending(clock: Clock) -> None:
+    clock.now = datetime(2026, 1, 1, 23, 50, tzinfo=UTC)
+    store = capped(clock, 2)
+    proposals = [store.create(DRAFT) for _ in range(3)]
+    for p in proposals[:2]:
+        store.claim(p.action_id, p.confirm_token)
+        store.release(p.action_id, created=True)
+
+    assert store.daily_limit_reached() is True
+    last = proposals[2]
+    with pytest.raises(ProposalDailyLimitError):
+        store.claim(last.action_id, last.confirm_token)
+
+    clock.now = datetime(2026, 1, 2, 0, 0, 5, tzinfo=UTC)  # UTC rollover, within TTL
+    assert store.daily_limit_reached() is False
+    assert store.claim(last.action_id, last.confirm_token) == DRAFT
+
+
+def test_reserved_slots_count_and_failed_creation_frees_them(clock: Clock) -> None:
+    store = capped(clock, 2)
+    a, b, c = (store.create(DRAFT) for _ in range(3))
+    store.claim(a.action_id, a.confirm_token)
+    store.claim(b.action_id, b.confirm_token)  # both reserved, none created yet
+
+    with pytest.raises(ProposalDailyLimitError):
+        store.claim(c.action_id, c.confirm_token)
+
+    store.release(a.action_id, created=False)  # e.g. GitHub 5xx
+    assert store.claim(c.action_id, c.confirm_token) == DRAFT
+
+
+def test_only_created_releases_count(clock: Clock) -> None:
+    store = capped(clock, 1)
+    for _ in range(5):
+        p = store.create(DRAFT)
+        store.claim(p.action_id, p.confirm_token)
+        store.release(p.action_id, created=False)
+    assert store.daily_limit_reached() is False
+    p = store.create(DRAFT)
+    store.claim(p.action_id, p.confirm_token)
+    store.release(p.action_id, created=True)
+    assert store.daily_limit_reached() is True
+
+
+def test_slot_reserved_before_midnight_does_not_count_for_new_day(clock: Clock) -> None:
+    clock.now = datetime(2026, 1, 1, 23, 59, tzinfo=UTC)
+    store = capped(clock, 1)
+    a, b = store.create(DRAFT), store.create(DRAFT)
+    store.claim(a.action_id, a.confirm_token)
+
+    clock.now = datetime(2026, 1, 2, 0, 1, tzinfo=UTC)
+    assert store.daily_limit_reached() is False  # yesterday's reservation is not today's
+    store.release(a.action_id, created=True)  # counted for its own (previous) day only
+    assert store.daily_limit_reached() is False
+    assert store.claim(b.action_id, b.confirm_token) == DRAFT
+    assert store.daily_limit_reached() is True
+
+
+def test_release_of_unknown_id_is_harmless(clock: Clock) -> None:
+    store = capped(clock, 1)
+    store.release("never-claimed", created=True)
+    assert store.daily_limit_reached() is False
+
+
+def test_no_cap_by_default(clock: Clock) -> None:
+    store = InMemoryProposalStore(TTL, max_pending=100, clock=clock)
+    for _ in range(50):
+        p = store.create(DRAFT)
+        store.claim(p.action_id, p.confirm_token)
+        store.release(p.action_id, created=True)
+    assert store.daily_limit_reached() is False
+
+
+def test_concurrent_claims_never_exceed_daily_cap() -> None:
+    store = InMemoryProposalStore(900, max_pending=100, max_per_day=4)
+    proposals = [store.create(DRAFT) for _ in range(24)]
+    barrier = threading.Barrier(len(proposals))
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def worker(action_id: str, token: str) -> None:
+        barrier.wait()
+        try:
+            store.claim(action_id, token)
+            store.release(action_id, created=True)
+            outcome = "ok"
+        except ProposalDailyLimitError:
+            outcome = "limit"
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [
+        threading.Thread(target=worker, args=(p.action_id, p.confirm_token)) for p in proposals
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert outcomes.count("ok") == 4
+    assert outcomes.count("limit") == 20
+
+
+def test_invalid_daily_cap() -> None:
+    with pytest.raises(ValueError):
+        InMemoryProposalStore(TTL, max_pending=1, max_per_day=0)
