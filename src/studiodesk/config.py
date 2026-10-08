@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # Confirmed actions
     action_ttl_s: int = Field(default=900, ge=30, le=86_400)
     action_max_pending: int = Field(default=1000, ge=1, le=100_000)
+    # Kill switch for outward actions. Default: on in dev/test, OFF in prod unless set
+    # explicitly (see _actions_off_in_prod_by_default): there is no auth yet.
+    actions_enabled: bool = True
+    # Maximum GitHub issues filed per UTC day (per process).
+    actions_max_per_day: int = Field(default=20, ge=1, le=10_000)
 
     # Vector store / embeddings
     qdrant_url: str | None = Field(default=None, max_length=2048)
@@ -150,6 +155,13 @@ class Settings(BaseSettings):
         """In prod, refuse to start without a remote Qdrant (no embedded local store)."""
         if self.app_env == "prod" and not self.qdrant_url:
             raise ValueError("qdrant_url is required when app_env is prod")
+        return self
+
+    @model_validator(mode="after")
+    def _actions_off_in_prod_by_default(self) -> "Settings":
+        """Disable outward actions in prod unless ACTIONS_ENABLED was set explicitly."""
+        if self.app_env == "prod" and "actions_enabled" not in self.model_fields_set:
+            object.__setattr__(self, "actions_enabled", False)
         return self
 
     @model_validator(mode="after")

@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from studiodesk.actions.proposals import (
     ProposalCapacityError,
+    ProposalDailyLimitError,
     ProposalError,
     ProposalExpiredError,
     ProposalUsedError,
@@ -25,6 +26,8 @@ ACTION_NOT_FOUND_DETAIL = "Action not found"
 ACTION_USED_DETAIL = "Action was already confirmed or cancelled"
 ACTION_EXPIRED_DETAIL = "Action expired"
 ISSUE_FAILED_DETAIL = "The issue could not be created"
+ACTIONS_DISABLED_DETAIL = "Issue filing is disabled"
+DAILY_LIMIT_DETAIL = "Daily issue limit reached"
 
 
 def llm_http_error(exc: LLMError) -> HTTPException:
@@ -50,11 +53,14 @@ def vector_store_http_error() -> HTTPException:
 
 
 def proposal_http_error(exc: ProposalError) -> HTTPException:
-    """404 unknown/wrong token, 409 used, 410 expired, 503 store full."""
+    """404 unknown/wrong token, 409 used, 410 expired, 503 store full or daily cap."""
     if isinstance(exc, ProposalUsedError):
         return HTTPException(status_code=409, detail=ACTION_USED_DETAIL)
     if isinstance(exc, ProposalExpiredError):
         return HTTPException(status_code=410, detail=ACTION_EXPIRED_DETAIL)
+    if isinstance(exc, ProposalDailyLimitError):
+        logger.warning("daily issue limit reached")
+        return HTTPException(status_code=503, detail=DAILY_LIMIT_DETAIL)
     if isinstance(exc, ProposalCapacityError):
         logger.warning("proposal store full")
         return HTTPException(status_code=503, detail=ACTIONS_UNAVAILABLE_DETAIL)

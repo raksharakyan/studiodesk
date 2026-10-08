@@ -8,8 +8,15 @@ anything from the confirm request. A proposal moves from `pending` to exactly on
 
 Errors map to HTTP status codes in the API: unknown id or wrong token -> 404 (existence is
 not revealed without the token), already confirmed/cancelled -> 409, expired -> 410, store
-full -> 503. Records are kept for one extra TTL after expiry so late or repeated requests
-still get 409/410 rather than 404, then purged.
+full or daily cap reached -> 503. Records are kept for one extra TTL after expiry so late
+or repeated requests still get 409/410 rather than 404, then purged.
+
+Daily cap: with `max_per_day` set, at most that many issues are filed per UTC day.
+`claim` reserves a slot under the same lock that marks the proposal confirmed (so
+concurrent confirms cannot overshoot), and the caller must `release` it afterwards with
+`created=True` only if the issue was actually created; failed creations free the slot.
+When no slot is left, `claim` raises `ProposalDailyLimitError` and the proposal stays
+pending (its token is not consumed).
 
 `InMemoryProposalStore` keeps proposals in process memory, like the rate limiter in
 `studiodesk.api.ratelimit`: with N uvicorn workers or N replicas, a confirm only succeeds
@@ -25,7 +32,7 @@ import secrets
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -71,6 +78,10 @@ class ProposalCapacityError(ProposalError):
     """Too many pending proposals are held (503)."""
 
 
+class ProposalDailyLimitError(ProposalError):
+    """The daily cap on filed issues is reached (503); the proposal stays pending."""
+
+
 @dataclass(frozen=True)
 class NewProposal:
     """What the creator receives once: the id, the plain token and the expiry."""
@@ -113,6 +124,14 @@ class ProposalStore(Protocol):
         """
         ...
 
+    def release(self, action_id: str, *, created: bool) -> None:
+        """Release the daily slot reserved by `claim`, counting it only if `created`."""
+        ...
+
+    def daily_limit_reached(self) -> bool:
+        """True if no daily slot is left (created plus reserved >= cap)."""
+        ...
+
 
 def _digest(token: str) -> bytes:
     """SHA-256 of the token, so plain tokens are never held server-side."""
@@ -120,17 +139,36 @@ def _digest(token: str) -> bytes:
 
 
 class InMemoryProposalStore:
-    """Thread-safe in-memory `ProposalStore` with a TTL and a cap on held records."""
+    """Thread-safe in-memory `ProposalStore` with a TTL, a cap on held records and an
+    optional daily cap on filed issues (UTC day)."""
 
-    def __init__(self, ttl_s: int, *, max_pending: int, clock: Clock = utc_now) -> None:
-        """Proposals expire `ttl_s` seconds after creation; at most `max_pending` are held."""
-        if ttl_s <= 0 or max_pending <= 0:
-            raise ValueError("ttl_s and max_pending must be positive")
+    def __init__(
+        self,
+        ttl_s: int,
+        *,
+        max_pending: int,
+        max_per_day: int | None = None,
+        clock: Clock = utc_now,
+    ) -> None:
+        """Proposals expire `ttl_s` seconds after creation; at most `max_pending` are held.
+
+        Args:
+            ttl_s: Seconds a proposal can be confirmed.
+            max_pending: Maximum pending proposals held at once.
+            max_per_day: Maximum issues filed per UTC day (None = no cap).
+            clock: Returns the current aware UTC datetime (injectable for tests).
+        """
+        if ttl_s <= 0 or max_pending <= 0 or (max_per_day is not None and max_per_day <= 0):
+            raise ValueError("ttl_s, max_pending and max_per_day must be positive")
         self._ttl = timedelta(seconds=ttl_s)
         self._max_pending = max_pending
+        self._max_per_day = max_per_day
         self._clock = clock
         self._records: dict[str, _Record] = {}
         self._lock = threading.Lock()
+        self._day: date = clock().date()
+        self._created_today = 0
+        self._reserved: dict[str, date] = {}
 
     def create(self, draft: IssueDraft) -> NewProposal:
         """Store `draft` as pending; raises `ProposalCapacityError` when full."""
@@ -147,11 +185,43 @@ class InMemoryProposalStore:
         return NewProposal(action_id=action_id, confirm_token=token, expires_at=expires_at)
 
     def claim(self, action_id: str, token: str) -> IssueDraft:
-        """Confirm the proposal (single use) and return the stored draft."""
+        """Confirm the proposal (single use), reserve a daily slot, return the draft.
+
+        Raises:
+            ProposalDailyLimitError: no slot left today (the proposal stays pending).
+        """
         with self._lock:
             record = self._pending_record(action_id, token)
+            if self._max_per_day is not None and self._slots_used() >= self._max_per_day:
+                raise ProposalDailyLimitError("daily issue limit reached")
             record.state = ProposalState.CONFIRMED
+            self._reserved[action_id] = self._day
             return record.draft
+
+    def release(self, action_id: str, *, created: bool) -> None:
+        """Free the slot reserved by `claim`; count it for its day only if `created`."""
+        with self._lock:
+            day = self._reserved.pop(action_id, None)
+            self._roll_day()
+            if created and day == self._day:
+                self._created_today += 1
+
+    def daily_limit_reached(self) -> bool:
+        """True if the daily cap is set and created plus reserved slots reach it."""
+        with self._lock:
+            return self._max_per_day is not None and self._slots_used() >= self._max_per_day
+
+    def _roll_day(self) -> None:
+        """Reset the daily count when the UTC day changes (lock held)."""
+        today = self._clock().date()
+        if today != self._day:
+            self._day = today
+            self._created_today = 0
+
+    def _slots_used(self) -> int:
+        """Issues created today plus slots reserved today (lock held)."""
+        self._roll_day()
+        return self._created_today + sum(day == self._day for day in self._reserved.values())
 
     def cancel(self, action_id: str, token: str) -> None:
         """Cancel the pending proposal."""

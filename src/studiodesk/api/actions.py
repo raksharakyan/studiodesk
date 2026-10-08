@@ -4,6 +4,10 @@ Confirm executes the draft stored at proposal time; the request contributes only
 action id (path) and the single-use token (body). The token is consumed before GitHub is
 called, so a failed or ambiguous creation is never retried with the same token (no
 duplicate issues); the user re-submits through `/bugs/check` instead.
+
+With `actions_enabled` false, confirm returns 503 "Issue filing is disabled" without
+touching the token. `claim` reserves one of today's `actions_max_per_day` slots; it is
+counted only when GitHub reports the issue created, and freed otherwise.
 """
 
 import logging
@@ -15,8 +19,9 @@ from slowapi import Limiter
 from studiodesk.actions.github import GitHubError, GitHubIssues
 from studiodesk.actions.proposals import ProposalError, ProposalStore
 from studiodesk.actions.slack import SlackNotifier
-from studiodesk.api.deps import get_github, get_proposal_store, get_slack
-from studiodesk.api.errors import ISSUE_FAILED_DETAIL, proposal_http_error
+from studiodesk.api.deps import get_github, get_proposal_store, get_settings, get_slack
+from studiodesk.api.errors import ACTIONS_DISABLED_DETAIL, ISSUE_FAILED_DETAIL, proposal_http_error
+from studiodesk.config import Settings
 from studiodesk.models.actions import (
     ACTION_ID_PATTERN,
     CancelResponse,
@@ -29,11 +34,21 @@ logger = logging.getLogger(__name__)
 ActionIdPath = Annotated[str, Path(pattern=ACTION_ID_PATTERN)]
 
 
+def require_actions_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> None:
+    """503 "Issue filing is disabled" before any token is looked at or consumed."""
+    if not settings.actions_enabled:
+        raise HTTPException(status_code=503, detail=ACTIONS_DISABLED_DETAIL)
+
+
 def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
     """Create the actions router, rate-limited per client IP by `limiter` at `rate_limit`."""
     router = APIRouter(tags=["actions"])
 
-    @router.post("/actions/{action_id}/confirm", response_model=ConfirmResponse)
+    @router.post(
+        "/actions/{action_id}/confirm",
+        response_model=ConfirmResponse,
+        dependencies=[Depends(require_actions_enabled)],
+    )
     @limiter.limit(rate_limit)
     def confirm_action(
         request: Request,
@@ -51,8 +66,13 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
         try:
             issue = github.create(draft)
         except GitHubError as exc:
+            proposals.release(action_id, created=False)
             logger.warning("issue creation failed", extra={"error": str(exc)})
             raise HTTPException(status_code=502, detail=ISSUE_FAILED_DETAIL) from None
+        except BaseException:
+            proposals.release(action_id, created=False)
+            raise
+        proposals.release(action_id, created=True)
         logger.info("issue filed", extra={"issue_number": issue.number})
         slack_status = slack.notify_issue_created(issue, draft)
         return ConfirmResponse(issue_number=issue.number, issue_url=issue.url, slack=slack_status)

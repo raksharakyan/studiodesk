@@ -24,7 +24,13 @@ from studiodesk.api.deps import (
     get_retriever,
     get_settings,
 )
-from studiodesk.api.errors import llm_http_error, proposal_http_error, vector_store_http_error
+from studiodesk.api.errors import (
+    ACTIONS_DISABLED_DETAIL,
+    DAILY_LIMIT_DETAIL,
+    llm_http_error,
+    proposal_http_error,
+    vector_store_http_error,
+)
 from studiodesk.config import Settings
 from studiodesk.llm import LLMClient, LLMError
 from studiodesk.models.actions import ProposedAction
@@ -46,9 +52,29 @@ def propose_issue(
     duplicates: DuplicateCheck,
     proposals: ProposalStore,
     repo: str,
+    *,
+    actions_enabled: bool,
 ) -> ProposedAction:
-    """Store the issue draft as a pending proposal and return its public view."""
+    """Return the issue preview, stored as a pending proposal when filing is possible.
+
+    With filing disabled or today's cap reached, nothing is stored: the preview comes back
+    without id/token/expiry and with `actions_disabled_reason`.
+    """
     draft = build_issue_draft(report, routing, duplicates)
+    reason = None
+    if not actions_enabled:
+        reason = ACTIONS_DISABLED_DETAIL
+    elif proposals.daily_limit_reached():
+        reason = DAILY_LIMIT_DETAIL
+    if reason is not None:
+        return ProposedAction(
+            action_id=None,
+            confirm_token=None,
+            expires_at=None,
+            repo=repo,
+            preview=draft,
+            actions_disabled_reason=reason,
+        )
     proposal = proposals.create(draft)
     return ProposedAction(
         action_id=proposal.action_id,
@@ -92,7 +118,14 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
         proposed = None
         if duplicates.verdict is not DuplicateVerdict.DUPLICATE and github is not None:
             try:
-                proposed = propose_issue(body, routing, duplicates, proposals, github.repo)
+                proposed = propose_issue(
+                    body,
+                    routing,
+                    duplicates,
+                    proposals,
+                    github.repo,
+                    actions_enabled=settings.actions_enabled,
+                )
             except ProposalError as exc:
                 raise proposal_http_error(exc) from None
         logger.info(

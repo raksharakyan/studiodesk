@@ -39,16 +39,23 @@ class IssueDraft(BaseModel):
 
 
 class ProposedAction(BaseModel):
-    """A pending action the user must confirm with `confirm_token` before `expires_at`."""
+    """A pending action the user must confirm with `confirm_token` before `expires_at`.
+
+    When filing is disabled or today's cap is reached, only the preview is returned:
+    `action_id`, `confirm_token` and `expires_at` are null and `actions_disabled_reason`
+    says why. Nothing is stored in that case.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    action_id: str
+    action_id: str | None
     kind: Literal["file_issue"] = "file_issue"
-    confirm_token: str
-    expires_at: datetime
+    confirm_token: str | None
+    expires_at: datetime | None
     repo: str
     preview: IssueDraft
+    # Set (and id/token/expiry are null) when the issue cannot be filed right now.
+    actions_disabled_reason: str | None = None
 
 
 class ConfirmRequest(BaseModel):

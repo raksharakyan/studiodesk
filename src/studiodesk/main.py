@@ -109,10 +109,14 @@ def _make_lifespan(settings: Settings, injected: Injected) -> Lifespan:
                 injected.proposals
                 if injected.proposals is not None
                 else InMemoryProposalStore(
-                    settings.action_ttl_s, max_pending=settings.action_max_pending
+                    settings.action_ttl_s,
+                    max_pending=settings.action_max_pending,
+                    max_per_day=settings.actions_max_per_day,
                 )
             )
             app.state.github, app.state.slack = _build_outbound(settings, injected, stack)
+            if not settings.actions_enabled:
+                logger.warning("issue filing disabled: proposals are preview-only")
             logger.info("resources ready", extra={"collection": app.state.store.collection})
             yield
 
