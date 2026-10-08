@@ -43,6 +43,7 @@ def test_every_secret_field_redacted(capsys: pytest.CaptureFixture[str]) -> None
         "github_token": "secret-github-3",
         "slack_webhook_url": "https://hooks.slack.com/services/T000/B000/fakesecret4",
         "elevenlabs_api_key": "secret-eleven-5",
+        "groq_api_key": "secret-groq-6",
     }
     configure_logging(Settings(_env_file=None, **secrets))  # type: ignore[arg-type]
 

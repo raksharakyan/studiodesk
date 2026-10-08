@@ -1,7 +1,6 @@
-"""LLM access behind a small Protocol, with an Anthropic implementation.
+"""Optional Anthropic adapter for `LLMClient` (the default provider is Groq).
 
-`LLMClient.structured` sends one system prompt plus one user message and returns an
-instance of the requested Pydantic schema. `AnthropicLLM` uses the official SDK's
+`AnthropicLLM` uses the official SDK's
 structured outputs: the JSON schema goes in `output_config.format` (built with the SDK's
 own `transform_schema`, as `messages.parse` does) together with `output_config.effort`.
 
@@ -19,7 +18,7 @@ Prompts and model output are never logged; only model, stop reason and token cou
 """
 
 import logging
-from typing import Literal, Protocol
+from typing import Literal
 
 import anthropic
 from anthropic.types.anthropic_beta_param import AnthropicBetaParam
@@ -27,6 +26,13 @@ from anthropic.types.beta import BetaMessage, BetaOutputConfigParam, BetaTextBlo
 from pydantic import BaseModel, ValidationError
 
 from studiodesk.config import Settings
+from studiodesk.llm.base import (
+    LLMInvalidOutput,
+    LLMRefusal,
+    LLMTruncated,
+    LLMUnavailable,
+    error_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,40 +43,6 @@ _OK_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
 _TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
-
-
-class LLMError(RuntimeError):
-    """Base class for LLM failures. Messages are safe to log, never to return to clients."""
-
-
-class LLMUnavailable(LLMError):  # noqa: N818 (names fixed by the M3 spec)
-    """The provider could not be reached or rejected the call (rate limit, 5xx, timeout)."""
-
-
-class LLMRefusal(LLMError):  # noqa: N818 (names fixed by the M3 spec)
-    """The model declined to answer (`stop_reason == "refusal"`)."""
-
-
-class LLMTruncated(LLMError):  # noqa: N818 (names fixed by the M3 spec)
-    """The response hit the token limit before the structured output was complete."""
-
-
-class LLMInvalidOutput(LLMError):  # noqa: N818 (names fixed by the M3 spec)
-    """The response did not contain JSON matching the requested schema."""
-
-
-class LLMClient(Protocol):
-    """Anything that can turn a system prompt plus user content into a schema instance."""
-
-    def structured[SchemaT: BaseModel](
-        self, system: str, user_content: str, schema: type[SchemaT]
-    ) -> SchemaT:
-        """Return the model's answer parsed as `schema`.
-
-        Raises:
-            LLMError: any failure (a subclass says which kind).
-        """
-        ...
 
 
 class AnthropicLLM:
@@ -117,7 +89,7 @@ class AnthropicLLM:
         )
         return cls(
             client,
-            model=settings.llm_model,
+            model=settings.resolved_llm_model,
             max_tokens=settings.llm_max_tokens,
             effort=settings.llm_effort,
             refusal_fallback=settings.llm_refusal_fallback,
@@ -182,13 +154,7 @@ class AnthropicLLM:
             anthropic.APIConnectionError,
             anthropic.APIError,
         ) as exc:
-            raise LLMUnavailable(f"anthropic call failed: {_error_name(exc)}") from exc
-
-
-def _error_name(exc: BaseException) -> str:
-    """Class name plus HTTP status (if any); never the message, which may echo the request."""
-    status = getattr(exc, "status_code", None)
-    return f"{type(exc).__name__}({status})" if isinstance(status, int) else type(exc).__name__
+            raise LLMUnavailable(f"anthropic call failed: {error_name(exc)}") from exc
 
 
 def _check_stop_reason(message: BetaMessage) -> None:

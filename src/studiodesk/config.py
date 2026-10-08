@@ -12,6 +12,10 @@ GITHUB_REPO_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}
 RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
+DEFAULT_LLM_MODELS = {
+    "groq": "llama-3.3-70b-versatile",
+    "anthropic": "claude-sonnet-5-5",
+}
 
 
 class Settings(BaseSettings):
@@ -37,9 +41,14 @@ class Settings(BaseSettings):
     max_request_bytes: int = Field(default=64_000, gt=0, le=10_000_000)
 
     # LLM
-    llm_provider: Literal["anthropic"] = "anthropic"
-    llm_model: str = Field(default="claude-sonnet-5-5", min_length=1, max_length=128)
+    # Groq is the default (free tier); Anthropic is an optional second provider.
+    llm_provider: Literal["groq", "anthropic"] = "groq"
+    # Unset = the provider's default from DEFAULT_LLM_MODELS (see `resolved_llm_model`).
+    llm_model: str | None = Field(default=None, min_length=1, max_length=128)
+    groq_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
+    # Sampling temperature (used by Groq; structured Anthropic calls use the default).
+    llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     # Output effort for the model (`output_config.effort`).
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     llm_max_tokens: int = Field(default=2048, gt=0, le=32_000)
@@ -105,6 +114,16 @@ class Settings(BaseSettings):
     elevenlabs_api_key: SecretStr | None = None
     elevenlabs_agent_id: str | None = Field(default=None, max_length=128)
 
+    @property
+    def resolved_llm_model(self) -> str:
+        """`llm_model` if set, else the default model of `llm_provider`."""
+        return self.llm_model or DEFAULT_LLM_MODELS[self.llm_provider]
+
+    @property
+    def llm_api_key(self) -> SecretStr | None:
+        """The API key of the selected `llm_provider` (None if not configured)."""
+        return self.groq_api_key if self.llm_provider == "groq" else self.anthropic_api_key
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalise_log_level(cls, value: object) -> object:
@@ -133,7 +152,14 @@ class Settings(BaseSettings):
             raise ValueError("dup_candidate_threshold must not exceed dup_auto_threshold")
         return self
 
-    @field_validator("anthropic_api_key", "github_token", "slack_webhook_url", mode="before")
+    @field_validator(
+        "groq_api_key",
+        "anthropic_api_key",
+        "github_token",
+        "slack_webhook_url",
+        "llm_model",
+        mode="before",
+    )
     @classmethod
     def _empty_integration_value_is_unset(cls, value: object) -> object:
         """Treat an empty integration value (e.g. `SLACK_WEBHOOK_URL=`) as not configured."""

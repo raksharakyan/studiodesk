@@ -23,7 +23,7 @@ from studiodesk.api.deps import get_settings
 from studiodesk.api.ratelimit import build_limiter, rate_limit_exceeded_handler
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder, SentenceTransformerEmbedder
-from studiodesk.llm import AnthropicLLM, LLMClient
+from studiodesk.llm import LLMClient, build_llm
 from studiodesk.logging import configure_logging
 from studiodesk.middleware import BodySizeLimitMiddleware
 from studiodesk.vectorstore import QdrantStore, build_qdrant_client
@@ -55,12 +55,10 @@ def _build_store(settings: Settings, stack: ExitStack) -> QdrantStore:
 
 
 def _build_llm(settings: Settings, stack: ExitStack) -> LLMClient | None:
-    """Create the Anthropic client if a key is configured, else None (routes return 503)."""
-    if settings.anthropic_api_key is None:
-        logger.warning("llm not configured: /ask and /bugs/check will return 503")
-        return None
-    llm = AnthropicLLM.from_settings(settings)
-    stack.callback(llm.close)
+    """Create the configured provider's client, or None without a key (routes return 503)."""
+    llm = build_llm(settings)
+    if llm is not None:
+        stack.callback(llm.close)
     return llm
 
 

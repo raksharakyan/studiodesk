@@ -8,6 +8,7 @@ from pydantic import SecretStr, ValidationError
 from studiodesk.config import Settings
 
 SECRET_FIELDS = (
+    "groq_api_key",
     "anthropic_api_key",
     "qdrant_api_key",
     "github_token",
@@ -21,6 +22,7 @@ ALL_ENV_VARS = (
     "MAX_REQUEST_BYTES",
     "LLM_PROVIDER",
     "LLM_MODEL",
+    "GROQ_API_KEY",
     "ANTHROPIC_API_KEY",
     "QDRANT_URL",
     "QDRANT_API_KEY",
@@ -54,8 +56,9 @@ def test_defaults() -> None:
 
     assert s.app_env == "dev"
     assert s.log_level == "INFO"
-    assert s.llm_provider == "anthropic"
-    assert s.llm_model == "claude-sonnet-5-5"
+    assert s.llm_provider == "groq"
+    assert s.llm_model is None
+    assert s.resolved_llm_model == "llama-3.3-70b-versatile"
     assert s.qdrant_collection == "studiodesk"
     assert s.embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
     assert s.max_request_bytes == 64_000
@@ -122,6 +125,7 @@ def test_settings_are_frozen() -> None:
 
 # Values are valid for each field's validators (Slack URLs must be hooks.slack.com).
 SECRET_SAMPLES = {
+    "groq_api_key": "super-secret-groq_api_key-value",
     "anthropic_api_key": "super-secret-anthropic_api_key-value",
     "qdrant_api_key": "super-secret-qdrant_api_key-value",
     "github_token": "super-secret-github_token-value",

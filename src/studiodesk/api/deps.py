@@ -20,6 +20,7 @@ from studiodesk.vectorstore import QdrantStore
 
 SERVICE_UNAVAILABLE_DETAIL = "Search is temporarily unavailable"
 LLM_UNAVAILABLE_DETAIL = "The assistant is temporarily unavailable"
+LLM_NOT_CONFIGURED_DETAIL = "LLM not configured"
 ACTIONS_UNAVAILABLE_DETAIL = "Actions are temporarily unavailable"
 ISSUES_UNAVAILABLE_DETAIL = "Issue filing is temporarily unavailable"
 
@@ -61,7 +62,7 @@ def get_llm(request: Request) -> LLMClient:
     """Return the LLM client built at startup, or 503 if none is configured."""
     llm: LLMClient | None = getattr(request.app.state, "llm", None)
     if llm is None:
-        raise HTTPException(status_code=503, detail=LLM_UNAVAILABLE_DETAIL)
+        raise HTTPException(status_code=503, detail=LLM_NOT_CONFIGURED_DETAIL)
     return llm
 
 
