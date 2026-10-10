@@ -1,12 +1,16 @@
 """The five eval suites. Each calls the real agent functions through the same code paths as
 the API (`answer_question`, `check_duplicates`, `route_bug`) and returns a `SuiteResult`.
 
-Per-case LLM or vector-store failures are recorded as failures (and count as wrong), so a
-flaky provider lowers the scores visibly instead of silently shrinking the case set.
+Errored vs failed: a case whose LLM or vector-store call raised is *errored*. It is listed
+separately, shown in the per-case table, and excluded from every metric (metrics are over
+completed cases, with the errored count next to them), so a provider outage neither
+counts as a wrong answer nor silently disappears. A *failure* is a completed case whose
+result is wrong. Any errored case makes `evals.run` exit non-zero.
 """
 
+import sys
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +44,13 @@ from studiodesk.vectorstore import QdrantStore, ScoredChunk, VectorStoreError
 RETRIEVAL_K = 5
 NO_PREDICTION = "none"
 CaseError = (LLMError, VectorStoreError)
+# Modules that can perform outward actions; the harness must never load them.
+ACTION_MODULES = (
+    "studiodesk.actions.github",
+    "studiodesk.actions.slack",
+    "studiodesk.actions.proposals",
+    "studiodesk.api",
+)
 
 
 class RecordingRetriever(Retriever):
@@ -82,22 +93,46 @@ class EvalStack:
 
 @dataclass
 class SuiteResult:
-    """Metrics, per-case rows, failures and extra tables for one suite."""
+    """Metrics (over completed cases), per-case rows, failures, errored cases, tables."""
 
     name: str
     metrics: dict[str, Any]
     cases: list[dict[str, Any]]
     failures: list[tuple[str, str]]
     tables: dict[str, Any] = field(default_factory=dict)
+    errored: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _r(value: float | None) -> float | None:
     return None if value is None else round(value, 3)
 
 
+def _mean_or_none(values: Iterable[float]) -> float | None:
+    """Rounded mean, or None when there are no values (no completed cases)."""
+    items = list(values)
+    return _r(metrics.mean(items)) if items else None
+
+
 def _error(exc: Exception) -> str:
     """Class name only (messages may echo provider details)."""
     return f"error: {type(exc).__name__}"
+
+
+def _completed(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows of cases that ran to completion (metrics are computed over these only)."""
+    return [r for r in rows if not r.get("errored")]
+
+
+def _mark_errored(
+    row: dict[str, Any], case_id: str, exc: Exception, errored: list[tuple[str, str]]
+) -> None:
+    row.update(errored=True, error=_error(exc))
+    errored.append((case_id, row["error"]))
+
+
+def action_modules_loaded() -> list[str]:
+    """Outward-action modules present in this process (expected: none)."""
+    return sorted(m for m in sys.modules if m.startswith(ACTION_MODULES))
 
 
 def _require_llm(llm: LLMClient | None, suite: str) -> LLMClient:
@@ -113,13 +148,16 @@ def run_retrieval(cases: Sequence[RetrievalCase], stack: EvalStack) -> SuiteResu
     """hit@5, MRR@5 and recall@5 over the top-5 chunks (doc ids deduplicated)."""
     rows: list[dict[str, Any]] = []
     failures: list[tuple[str, str]] = []
+    errored: list[tuple[str, str]] = []
     for case in cases:
         relevant = set(case.labels.relevant_ids)
         try:
             hits = stack.retriever.search(case.inputs.question, None, RETRIEVAL_K)
         except VectorStoreError as exc:
-            failures.append((case.id, _error(exc)))
-            hits = []
+            failed_row: dict[str, Any] = {"id": case.id, "split": case.split}
+            _mark_errored(failed_row, case.id, exc, errored)
+            rows.append(failed_row)
+            continue
         ranked = metrics.dedupe_ranked(h.chunk.doc_id for h in hits)
         row = {
             "id": case.id,
@@ -133,17 +171,21 @@ def run_retrieval(cases: Sequence[RetrievalCase], stack: EvalStack) -> SuiteResu
         rows.append(row)
         if not row["hit"]:
             failures.append((case.id, f"no relevant doc in top {RETRIEVAL_K}: got {ranked}"))
+    done = _completed(rows)
     return SuiteResult(
         name="retrieval",
         metrics={
             "cases": len(rows),
-            f"hit@{RETRIEVAL_K}": _r(metrics.mean(r["hit"] for r in rows)),
-            f"mrr@{RETRIEVAL_K}": _r(metrics.mean(r["rr"] for r in rows)),
-            f"recall@{RETRIEVAL_K}": _r(metrics.mean(r["recall"] for r in rows)),
-            "hit@1": _r(metrics.mean(float(r["rr"] == 1.0) for r in rows)),
+            "completed": len(done),
+            "errored": len(errored),
+            f"hit@{RETRIEVAL_K}": _mean_or_none(r["hit"] for r in done),
+            f"mrr@{RETRIEVAL_K}": _mean_or_none(r["rr"] for r in done),
+            f"recall@{RETRIEVAL_K}": _mean_or_none(r["recall"] for r in done),
+            "hit@1": _mean_or_none(float(r["rr"] == 1.0) for r in done),
         },
         cases=rows,
         failures=failures,
+        errored=errored,
     )
 
 
@@ -151,11 +193,15 @@ def run_retrieval(cases: Sequence[RetrievalCase], stack: EvalStack) -> SuiteResu
 
 
 def run_answer(cases: Sequence[AnswerCase], stack: EvalStack) -> SuiteResult:
-    """Groundedness (judge), citation validity, fact recall and refusal behaviour."""
+    """Groundedness (judge), citation validity, fact recall and refusal behaviour.
+
+    A case is errored if the answer call or its judge call raised.
+    """
     llm = _require_llm(stack.answer_llm, "answer")
     judge = _require_llm(stack.judge_llm, "answer")
     rows: list[dict[str, Any]] = []
     failures: list[tuple[str, str]] = []
+    errored: list[tuple[str, str]] = []
     for case in cases:
         row: dict[str, Any] = {
             "id": case.id,
@@ -163,87 +209,92 @@ def run_answer(cases: Sequence[AnswerCase], stack: EvalStack) -> SuiteResult:
             "answerable": not case.labels.expect_insufficient,
         }
         rows.append(row)
+        case_failures: list[tuple[str, str]] = []
         try:
-            response = answer_question(
-                case.inputs.question,
-                None,
-                stack.retriever,
-                llm,
-                top_k=stack.settings.answer_top_k,
-            )
+            _answer_case(case, stack, llm, judge, row, case_failures)
         except CaseError as exc:
-            row["error"] = _error(exc)
-            failures.append((case.id, row["error"]))
+            _mark_errored(row, case.id, exc, errored)
             continue
-        hits = list(stack.retriever.last_hits)
-        retrieved = {h.chunk.doc_id for h in hits}
-        cited = [s.doc_id for s in response.sources]
-        invalid = unretrieved_ids(response.answer, cited, retrieved)
-        row.update(
-            insufficient=response.insufficient_context,
-            cited=cited,
-            removed_citations=response.removed_citations,
-            citations_valid=not invalid,
-            answer_chars=len(response.answer),
-        )
-        if invalid:
-            failures.append((case.id, f"unretrieved ids in answer or sources: {invalid}"))
-        if response.removed_citations:
-            failures.append(
-                (case.id, f"server removed {response.removed_citations} invented citation(s)")
-            )
-        if case.labels.expect_insufficient:
-            row["refusal_correct"] = response.insufficient_context
-            if not response.insufficient_context:
-                failures.append((case.id, "unanswerable question answered without refusal"))
-            continue
-        expected = set(case.labels.expected_ids)
-        row["expected_cited"] = bool(expected & set(cited))
-        row["expected_retrieved"] = bool(expected & retrieved)
-        recall, missing = fact_recall(response.answer, case.labels.key_facts)
-        row["fact_recall"] = recall
-        row["false_refusal"] = response.insufficient_context
-        if response.insufficient_context:
-            failures.append((case.id, "answerable question refused (insufficient_context)"))
-        if missing:
-            failures.append((case.id, f"missing key facts: {missing}"))
-        if not row["expected_cited"]:
-            failures.append((case.id, f"cited {cited}, none of the expected {sorted(expected)}"))
-        row.update(_judge_answer(case.id, response.answer, cited, hits, judge, failures))
-    answerable = [r for r in rows if r["answerable"]]
-    unanswerable = [r for r in rows if not r["answerable"]]
-    answered = [r for r in rows if "error" not in r]
+        failures += case_failures
+    done = _completed(rows)
+    answerable = [r for r in done if r["answerable"]]
+    unanswerable = [r for r in done if not r["answerable"]]
     grounded = [r["groundedness"] for r in answerable if r.get("groundedness") is not None]
     return SuiteResult(
         name="answer",
         metrics={
             "cases": len(rows),
-            "answerable": len(answerable),
-            "unanswerable": len(unanswerable),
-            "errors": sum("error" in r for r in rows),
-            "groundedness_mean": _r(metrics.mean(grounded)) if grounded else None,
+            "completed": len(done),
+            "errored": len(errored),
+            "answerable_completed": len(answerable),
+            "unanswerable_completed": len(unanswerable),
+            "groundedness_mean": _mean_or_none(grounded),
             "groundedness_judged": len(grounded),
-            "fully_grounded_rate": _r(
-                metrics.safe_div(sum(g == 1.0 for g in grounded), len(grounded))
+            "fully_grounded_rate": _mean_or_none(float(g == 1.0) for g in grounded),
+            "fact_recall_mean": _mean_or_none(r["fact_recall"] for r in answerable),
+            "expected_source_cited_rate": _mean_or_none(
+                float(r["expected_cited"]) for r in answerable
             ),
-            "fact_recall_mean": _r(metrics.mean(r.get("fact_recall", 0.0) for r in answerable)),
-            "expected_source_cited_rate": _r(
-                metrics.mean(float(r.get("expected_cited", False)) for r in answerable)
-            ),
-            "citation_validity": _r(
-                metrics.mean(float(r.get("citations_valid", False)) for r in answered)
-            ),
-            "removed_citations_total": sum(r.get("removed_citations", 0) for r in rows),
-            "false_refusal_rate": _r(
-                metrics.mean(float(r.get("false_refusal", True)) for r in answerable)
-            ),
-            "correct_refusal_rate": _r(
-                metrics.mean(float(r.get("refusal_correct", False)) for r in unanswerable)
+            "citation_validity": _mean_or_none(float(r["citations_valid"]) for r in done),
+            "removed_citations_total": sum(r["removed_citations"] for r in done),
+            "false_refusal_rate": _mean_or_none(float(r["false_refusal"]) for r in answerable),
+            "correct_refusal_rate": _mean_or_none(
+                float(r["refusal_correct"]) for r in unanswerable
             ),
         },
         cases=rows,
         failures=failures,
+        errored=errored,
     )
+
+
+def _answer_case(
+    case: AnswerCase,
+    stack: EvalStack,
+    llm: LLMClient,
+    judge: LLMClient,
+    row: dict[str, Any],
+    failures: list[tuple[str, str]],
+) -> None:
+    """Answer one question, fill `row` and append failures (raises on LLM/store errors)."""
+    response = answer_question(
+        case.inputs.question, None, stack.retriever, llm, top_k=stack.settings.answer_top_k
+    )
+    hits = list(stack.retriever.last_hits)
+    retrieved = {h.chunk.doc_id for h in hits}
+    cited = [s.doc_id for s in response.sources]
+    invalid = unretrieved_ids(response.answer, cited, retrieved)
+    row.update(
+        insufficient=response.insufficient_context,
+        cited=cited,
+        removed_citations=response.removed_citations,
+        citations_valid=not invalid,
+        answer_chars=len(response.answer),
+    )
+    if invalid:
+        failures.append((case.id, f"unretrieved ids in answer or sources: {invalid}"))
+    if response.removed_citations:
+        failures.append(
+            (case.id, f"server removed {response.removed_citations} invented citation(s)")
+        )
+    if case.labels.expect_insufficient:
+        row["refusal_correct"] = response.insufficient_context
+        if not response.insufficient_context:
+            failures.append((case.id, "unanswerable question answered without refusal"))
+        return
+    expected = set(case.labels.expected_ids)
+    row["expected_cited"] = bool(expected & set(cited))
+    row["expected_retrieved"] = bool(expected & retrieved)
+    recall, missing = fact_recall(response.answer, case.labels.key_facts)
+    row["fact_recall"] = recall
+    row["false_refusal"] = response.insufficient_context
+    if response.insufficient_context:
+        failures.append((case.id, "answerable question refused (insufficient_context)"))
+    if missing:
+        failures.append((case.id, f"missing key facts: {missing}"))
+    if not row["expected_cited"]:
+        failures.append((case.id, f"cited {cited}, none of the expected {sorted(expected)}"))
+    row.update(_judge_answer(case.id, response.answer, cited, hits, judge, failures))
 
 
 def _judge_answer(
@@ -254,18 +305,18 @@ def _judge_answer(
     judge: LLMClient,
     failures: list[tuple[str, str]],
 ) -> dict[str, Any]:
-    """Groundedness of `answer` against the full text of the cited chunks."""
+    """Groundedness of `answer` against the full text of the cited chunks.
+
+    Raises:
+        LLMError: if the judge call fails (the case is then errored).
+    """
     sources = [h.chunk for h in hits if h.chunk.doc_id in set(cited)]
     if not sources:
         failures.append((case_id, "answer cites no retrieved source (groundedness 0)"))
         return {"groundedness": 0.0, "claims": 0, "supported_claims": 0}
-    try:
-        verdict = judge.structured(
-            JUDGE_SYSTEM_PROMPT, build_judge_prompt(answer, sources), JudgeVerdict
-        )
-    except LLMError as exc:
-        failures.append((case_id, f"judge {_error(exc)}"))
-        return {"groundedness": None, "judge_error": type(exc).__name__}
+    verdict = judge.structured(
+        JUDGE_SYSTEM_PROMPT, build_judge_prompt(answer, sources), JudgeVerdict
+    )
     score, supported, total = groundedness(verdict, {c.doc_id for c in sources})
     if score is not None and score < 1.0:
         unsupported = [c.text for c in verdict.claims if not c.supported][:2]
@@ -302,6 +353,7 @@ def run_duplicates(cases: Sequence[DuplicateCase], stack: EvalStack) -> SuiteRes
     settings = stack.settings
     rows: list[dict[str, Any]] = []
     failures: list[tuple[str, str]] = []
+    errored: list[tuple[str, str]] = []
     for case in cases:
         labels = case.labels
         row: dict[str, Any] = {
@@ -323,8 +375,7 @@ def run_duplicates(cases: Sequence[DuplicateCase], stack: EvalStack) -> SuiteRes
                 exclude_ids=case.inputs.exclude_ids,
             )
         except CaseError as exc:
-            row.update(verdict="error", predicted_original=None, error=_error(exc))
-            failures.append((case.id, row["error"]))
+            _mark_errored(row, case.id, exc, errored)
             continue
         original = predicted_original(check)
         candidate_scores = {c.doc_id: round(c.score, 3) for c in check.candidates}
@@ -362,14 +413,15 @@ def run_duplicates(cases: Sequence[DuplicateCase], stack: EvalStack) -> SuiteRes
         split: _duplicate_metrics([r for r in rows if r["split"] == split])
         for split in ("calibration", "heldout")
     }
-    verdicts = Counter((r["kind"], r["verdict"]) for r in rows)
+    verdicts = Counter((r["kind"], r.get("verdict", "errored")) for r in rows)
     kinds = list(dict.fromkeys(r["kind"] for r in rows))
-    verdict_names = [v.value for v in DuplicateVerdict] + ["error"]
+    verdict_names = [v.value for v in DuplicateVerdict] + ["errored"]
     return SuiteResult(
         name="duplicates",
-        metrics={"overall": _duplicate_metrics(rows), **by_split},
+        metrics={"overall": _duplicate_metrics(rows), **by_split, "errored": len(errored)},
         cases=rows,
         failures=failures,
+        errored=errored,
         tables={
             "verdicts_by_kind": {
                 "rows": kinds,
@@ -380,7 +432,8 @@ def run_duplicates(cases: Sequence[DuplicateCase], stack: EvalStack) -> SuiteRes
     )
 
 
-def _duplicate_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _duplicate_metrics(all_rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    rows = _completed(all_rows)
     y_true = [r["expected"] == "duplicate" for r in rows]
     y_pred = [r["verdict"] in ("duplicate", "possible_duplicate") for r in rows]
     counts = metrics.binary_counts(y_true, y_pred)
@@ -391,16 +444,18 @@ def _duplicate_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     true_pos = [r for r in rows if r["expected"] == "duplicate" and r["verdict"] != "new"]
     positives = [r for r in rows if r["expected"] == "duplicate"]
     return {
-        "cases": len(rows),
+        "cases": len(all_rows),
+        "completed": len(rows),
+        "errored": len(all_rows) - len(rows),
         "positives": len(positives),
         "negatives": len(rows) - len(positives),
         "tp": counts.tp,
         "fp": counts.fp,
         "fn": counts.fn,
         "tn": counts.tn,
-        "precision": _r(counts.precision),
-        "recall": _r(counts.recall),
-        "f1": _r(counts.f1),
+        "precision": _r(counts.precision) if rows else None,
+        "recall": _r(counts.recall) if rows else None,
+        "f1": _r(counts.f1) if rows else None,
         "duplicate_verdicts": len(strict),
         "strict_precision_duplicate": _r(metrics.safe_div(strict_correct, len(strict)))
         if strict
@@ -471,7 +526,15 @@ def run_routing(cases: Sequence[RoutingCase], stack: EvalStack) -> SuiteResult:
     """Accuracy and macro-F1 for component and severity; component confusion matrix."""
     rows: list[dict[str, Any]] = []
     failures: list[tuple[str, str]] = []
+    errored: list[tuple[str, str]] = []
     for case in cases:
+        row: dict[str, Any] = {
+            "id": case.id,
+            "group": case.group,
+            "component_true": case.component.value,
+            "severity_true": case.severity.value,
+        }
+        rows.append(row)
         try:
             result = route_bug(
                 case.report,
@@ -479,47 +542,41 @@ def run_routing(cases: Sequence[RoutingCase], stack: EvalStack) -> SuiteResult:
                 k=stack.settings.routing_k,
                 exclude_ids=case.exclude_ids,
             )
-            component = result.component.value if result.component else NO_PREDICTION
-            severity = result.severity.value if result.severity else NO_PREDICTION
-            share = result.component_share
         except VectorStoreError as exc:
-            failures.append((case.id, _error(exc)))
-            component = severity = NO_PREDICTION
-            share = 0.0
-        rows.append(
-            {
-                "id": case.id,
-                "group": case.group,
-                "component_true": case.component.value,
-                "component_pred": component,
-                "component_share": share,
-                "severity_true": case.severity.value,
-                "severity_pred": severity,
-            }
-        )
+            _mark_errored(row, case.id, exc, errored)
+            continue
+        component = result.component.value if result.component else NO_PREDICTION
+        severity = result.severity.value if result.severity else NO_PREDICTION
+        share = result.component_share
+        row.update(component_pred=component, component_share=share, severity_pred=severity)
         if component != case.component.value:
             failures.append(
                 (case.id, f"component {component} (share {share:.2f}), expected {case.component}")
             )
+    done = _completed(rows)
     groups = {
-        "dataset_loo": [r for r in rows if r["group"] == "dataset_loo"],
-        "novel": [r for r in rows if r["group"] == "novel"],
-        "all": rows,
+        "dataset_loo": [r for r in done if r["group"] == "dataset_loo"],
+        "novel": [r for r in done if r["group"] == "novel"],
+        "all": done,
     }
     component_labels = [c.value for c in Component]
     severity_labels = [s.value for s in Severity]
-    if any(r["component_pred"] == NO_PREDICTION for r in rows):
+    if any(r["component_pred"] == NO_PREDICTION for r in done):
         component_labels.append(NO_PREDICTION)
-    if any(r["severity_pred"] == NO_PREDICTION for r in rows):
+    if any(r["severity_pred"] == NO_PREDICTION for r in done):
         severity_labels.append(NO_PREDICTION)
     return SuiteResult(
         name="routing",
-        metrics={name: _routing_metrics(group) for name, group in groups.items()},
+        metrics={
+            **{name: _routing_metrics(group) for name, group in groups.items()},
+            "errored": len(errored),
+        },
         cases=rows,
         failures=failures,
+        errored=errored,
         tables={
-            "component_confusion": _confusion(rows, "component", component_labels),
-            "severity_confusion": _confusion(rows, "severity", severity_labels),
+            "component_confusion": _confusion(done, "component", component_labels),
+            "severity_confusion": _confusion(done, "severity", severity_labels),
         },
     )
 
@@ -564,49 +621,56 @@ def _confusion(
 def run_injection(cases: Sequence[InjectionCase], stack: EvalStack) -> SuiteResult:
     """Pass rate of the injection assertions (see `evals.checks`).
 
-    No action can be executed: the harness never builds a GitHub or Slack client, a
-    proposal store, or calls confirm. `check_duplicates` and `answer_question` are
-    advisory and side-effect free; the store count is compared before and after.
+    No action can be executed: the harness never imports the GitHub, Slack or proposal
+    modules (checked at runtime via `sys.modules` and by a subprocess test) and never calls
+    confirm. `store_unchanged` checks the one side effect the harness could observe: the
+    vector store's point count before and after each case.
     """
     llm = _require_llm(stack.answer_llm, "injection")
     rows: list[dict[str, Any]] = []
     failures: list[tuple[str, str]] = []
+    errored: list[tuple[str, str]] = []
     for case in cases:
         runner: Callable[[InjectionCase, EvalStack, LLMClient], dict[str, Any]] = (
             _injection_ask if case.inputs.mode == "ask" else _injection_bug_check
         )
+        base = {"id": case.id, "split": case.split, "kind": case.labels.kind}
         try:
-            row = runner(case, stack, llm)
+            row = {**base, **runner(case, stack, llm)}
         except CaseError as exc:
-            row = {"error": _error(exc), "assertions": {"completed": False}}
-        row = {"id": case.id, "split": case.split, "kind": case.labels.kind, **row}
+            row = {**base, "mode": case.inputs.mode}
+            _mark_errored(row, case.id, exc, errored)
+            rows.append(row)
+            continue
         rows.append(row)
         failed = [name for name, ok in row["assertions"].items() if not ok]
         if failed:
             failures.append((case.id, f"failed: {failed} {row.get('detail', '')}".strip()))
-    passed = [r for r in rows if all(r["assertions"].values())]
-    names = sorted({name for r in rows for name in r["assertions"]})
+    done = _completed(rows)
+    passed = [r for r in done if all(r["assertions"].values())]
+    names = sorted({name for r in done for name in r["assertions"]})
     return SuiteResult(
         name="injection",
         metrics={
             "cases": len(rows),
+            "completed": len(done),
+            "errored": len(errored),
             "passed": len(passed),
-            "pass_rate": _r(metrics.safe_div(len(passed), len(rows))),
+            "pass_rate": _r(len(passed) / len(done)) if done else None,
             "per_assertion_pass_rate": {
-                name: _r(
-                    metrics.mean(
-                        float(r["assertions"][name]) for r in rows if name in r["assertions"]
-                    )
+                name: _mean_or_none(
+                    float(r["assertions"][name]) for r in done if name in r["assertions"]
                 )
                 for name in names
             },
-            "actions_executed": 0,
+            "action_modules_loaded": action_modules_loaded(),
             "duplicate_verdicts_on_injected": sum(
-                r.get("verdict") == "duplicate" and r.get("matched_injected", False) for r in rows
+                r.get("verdict") == "duplicate" and r.get("matched_injected", False) for r in done
             ),
         },
         cases=rows,
         failures=failures,
+        errored=errored,
     )
 
 
@@ -659,7 +723,7 @@ def _injection_ask(case: InjectionCase, stack: EvalStack, llm: LLMClient) -> dic
             **leaks,
             "only_retrieved_ids": not invalid,
             "no_forbidden_ids": not forbidden,
-            "no_action_executed": stack.store_count() == count_before,
+            "store_unchanged": stack.store_count() == count_before,
         },
     }
 
@@ -709,6 +773,6 @@ def _injection_bug_check(case: InjectionCase, stack: EvalStack, llm: LLMClient) 
             **leaks,
             "candidates_retrieved": set(candidate_ids) <= retrieved,
             "verdict_not_forced": verdict_ok,
-            "no_action_executed": stack.store_count() == count_before,
+            "store_unchanged": stack.store_count() == count_before,
         },
     }

@@ -1,5 +1,6 @@
-"""Eval LLM wrapper: disk cache, throttle, stats and token capture (no network)."""
+"""Eval LLM wrapper: disk cache, rate limiter, stats and token capture (no network)."""
 
+import json
 import logging
 from pathlib import Path
 
@@ -7,8 +8,8 @@ import pytest
 from evals.llm_cache import (
     CachedLLM,
     CallStats,
+    RateLimiter,
     ResponseCache,
-    Throttle,
     cache_key,
     capture_tokens,
 )
@@ -44,7 +45,7 @@ def _wrapped(
         inner,
         model,
         cache=ResponseCache(tmp_path / "cache"),
-        throttle=None,
+        limiter=None,
         stats=stats,
         read_cache=read_cache,
     )
@@ -157,34 +158,140 @@ def test_unreadable_cache_entry_is_a_miss(tmp_path: Path) -> None:
     assert cache.get("missing") is None
 
 
-def test_throttle_spaces_calls_by_interval() -> None:
+def test_limiter_caps_requests_per_sliding_window() -> None:
     clock = FakeClock()
-    throttle = Throttle(20, clock=clock, sleep=clock.sleep)  # 3 s apart
+    limiter = RateLimiter(2, 1_000_000, clock=clock, sleep=clock.sleep)
 
-    throttle.wait()
-    clock.now += 1.0
-    throttle.wait()
-    throttle.wait()
-    clock.now += 10.0
-    throttle.wait()
+    limiter.acquire(10)
+    clock.now += 5
+    limiter.acquire(10)
+    limiter.acquire(10)  # third request waits until the first leaves the 60 s window
 
-    assert clock.sleeps == pytest.approx([2.0, 3.0])
-    assert throttle.waited_s == pytest.approx(5.0)
+    assert sum(clock.sleeps) == pytest.approx(55.05)
 
 
-def test_throttle_rejects_non_positive_rpm() -> None:
+def test_limiter_caps_tokens_per_sliding_window() -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(100, 6_000, clock=clock, sleep=clock.sleep)
+
+    limiter.acquire(4_000)
+    clock.now += 10
+    limiter.acquire(2_000)  # fits exactly: 6,000
+    assert clock.sleeps == []
+    limiter.acquire(1)  # waits for the 4,000 entry to expire (t=160)
+
+    assert clock.now == pytest.approx(160.05)
+    assert limiter.tokens_in_window() == 2_001
+
+
+def test_oversized_request_waits_for_an_empty_window_then_goes_alone() -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(100, 1_000, clock=clock, sleep=clock.sleep)
+
+    limiter.acquire(10)
+    limiter.acquire(5_000)
+
+    assert clock.now == pytest.approx(160.05)
+    assert limiter.tokens_in_window() == 5_000
+
+
+def test_settle_replaces_the_estimate_with_actual_usage() -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(100, 6_000, clock=clock, sleep=clock.sleep)
+
+    usage = limiter.acquire(5_000)
+    limiter.settle(usage, 900, 300)
+    limiter.acquire(4_000)  # fits once the estimate was corrected to 1,200
+
+    assert clock.sleeps == []
+    assert limiter.tokens_in_window() == 5_200
+
+
+def test_output_estimate_starts_at_cap_then_learns_largest_output() -> None:
+    limiter = RateLimiter(10, 10_000)
+
+    assert limiter.estimate(4_000, 4_096) == 1_000 + 4_096
+    limiter.settle(limiter.acquire(10), 100, 300)
+    limiter.settle(limiter.acquire(10), 100, 700)
+    limiter.settle(limiter.acquire(10), 100, 200)
+
+    assert limiter.expected_output(4_096) == 700
+    assert limiter.expected_output(500) == 500
+
+
+@pytest.mark.parametrize(("rpm", "tpm"), [(0, 100), (10, 0), (-1, -1)])
+def test_limiter_rejects_non_positive_limits(rpm: int, tpm: int) -> None:
     with pytest.raises(ValueError, match="positive"):
-        Throttle(0)
+        RateLimiter(rpm, tpm)
 
 
-def test_cached_calls_are_not_throttled(tmp_path: Path) -> None:
+class ReportingLLM:
+    """Inner LLM that logs usage like the real adapters do."""
+
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        self.calls = 0
+        self._usage = (input_tokens, output_tokens)
+
+    def structured(self, system: str, user_content: str, schema: type[LLMAnswer]) -> LLMAnswer:
+        self.calls += 1
+        logging.getLogger("studiodesk.llm.groq_client").info(
+            "llm call completed",
+            extra={"input_tokens": self._usage[0], "output_tokens": self._usage[1]},
+        )
+        return ANSWER
+
+    def close(self) -> None:
+        """Nothing to release."""
+
+
+def test_cached_llm_charges_estimate_then_actual_usage(tmp_path: Path) -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(100, 50_000, clock=clock, sleep=clock.sleep)
+    stats = CallStats()
+    llm = CachedLLM(
+        ReportingLLM(1_000, 250),  # type: ignore[arg-type]
+        "m",
+        cache=ResponseCache(tmp_path),
+        limiter=limiter,
+        stats=stats,
+        max_output_tokens=4_096,
+    )
+
+    with capture_tokens(stats):
+        llm.structured("s" * 400, "u" * 400, LLMAnswer)
+        llm.structured("s" * 400, "other", LLMAnswer)
+
+    assert limiter.tokens_in_window() == 2 * 1_250
+    assert limiter.expected_output(4_096) == 250
+
+
+def test_estimate_counts_prompt_and_schema(tmp_path: Path) -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(100, 1_000_000, clock=clock, sleep=clock.sleep)
+    llm = CachedLLM(
+        FakeLLM({LLMAnswer: ANSWER}),
+        "m",
+        cache=None,
+        limiter=limiter,
+        stats=CallStats(),
+        max_output_tokens=100,
+    )
+
+    llm.structured("s" * 4_000, "u" * 4_000, LLMAnswer)  # no usage reported: estimate stays
+
+    schema_chars = len(json.dumps(LLMAnswer.model_json_schema()))
+    assert limiter.tokens_in_window() == (8_000 + schema_chars) // 4 + 100
+
+
+def test_cached_calls_are_not_rate_limited(tmp_path: Path) -> None:
     clock = FakeClock()
     stats = CallStats()
+    limiter = RateLimiter(1, 10, clock=clock, sleep=clock.sleep)
     llm = CachedLLM(
         FakeLLM({LLMAnswer: ANSWER}),
         "m",
         cache=ResponseCache(tmp_path),
-        throttle=Throttle(1, clock=clock, sleep=clock.sleep),
+        limiter=limiter,
         stats=stats,
     )
 
@@ -193,6 +300,7 @@ def test_cached_calls_are_not_throttled(tmp_path: Path) -> None:
 
     assert clock.sleeps == []
     assert stats.cache_hits == 4
+    assert len(limiter._window) == 1
 
 
 def test_capture_tokens_sums_adapter_log_records() -> None:

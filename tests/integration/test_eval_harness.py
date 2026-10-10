@@ -24,6 +24,7 @@ from fakes import FakeLLM, prompt_doc_ids
 from studiodesk.config import Settings
 from studiodesk.data.loader import Dataset
 from studiodesk.embeddings import Embedder
+from studiodesk.llm import LLMUnavailable
 from studiodesk.models.answer import LLMAnswer
 from studiodesk.models.bugs import (
     CandidateJudgement,
@@ -299,7 +300,7 @@ def test_injection_suite_detects_leaks(make_stack) -> None:  # type: ignore[no-u
     [row] = result.cases
     assert row["assertions"]["no_secrets"] is False
     assert row["assertions"]["no_system_prompt"] is False
-    assert row["assertions"]["no_action_executed"] is True
+    assert row["assertions"]["store_unchanged"] is True
     assert result.metrics["pass_rate"] == 0.0
     # The failure names what leaked, never the secret value itself.
     report_text = json.dumps(result.cases) + json.dumps(result.failures)
@@ -382,3 +383,44 @@ def test_predicted_original_rules() -> None:
     assert predicted_original(dup) == "BUG-0002"
     assert predicted_original(possible_agreed) == "BUG-0002"
     assert predicted_original(possible_score_only) == "BUG-0003"
+
+
+def test_judge_error_makes_the_case_errored_not_failed(make_stack) -> None:  # type: ignore[no-untyped-def]
+    def answer(system: str, user: str) -> LLMAnswer:
+        first = prompt_doc_ids(user)[0]
+        return LLMAnswer(answer=f"See [{first}].", cited_ids=[first], insufficient_context=False)
+
+    judge = FakeLLM({JudgeVerdict: LLMUnavailable("rate limited", retryable=True)})
+    stack = make_stack(FakeLLM({LLMAnswer: answer}), judge)
+
+    result = run_answer([_answer_case("cryo save"), _answer_case("pvp?", insufficient=True)], stack)
+
+    assert [cid for cid, _ in result.errored] == ["t"]
+    assert result.metrics["errored"] == 1
+    assert result.metrics["completed"] == 1
+    assert result.metrics["fact_recall_mean"] is None  # no completed answerable case
+    assert all(cid != "t" or "LLMUnavailable" not in why for cid, why in result.failures)
+    # The unanswerable case completed and is scored on its own.
+    assert result.metrics["unanswerable_completed"] == 1
+
+
+def test_injection_errors_are_excluded_from_pass_rate(make_stack) -> None:  # type: ignore[no-untyped-def]
+    ok = LLMAnswer(answer="Only game help.", cited_ids=[], insufficient_context=True)
+    calls = {"n": 0}
+
+    def flaky(system: str, user: str) -> LLMAnswer:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMUnavailable("rate limited", retryable=True)
+        return ok
+
+    stack = make_stack(FakeLLM({LLMAnswer: flaky}))
+
+    result = run_injection([_ask_injection("a"), _ask_injection("b")], stack)
+
+    assert result.metrics["errored"] == 1
+    assert result.metrics["completed"] == 1
+    assert result.metrics["pass_rate"] == 1.0
+    # `action_modules_loaded` is not asserted here: conftest imports the app, so this test
+    # process has them loaded. The harness process is checked by a subprocess test.
+    assert result.failures == []

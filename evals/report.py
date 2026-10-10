@@ -1,7 +1,9 @@
 """Render the eval results as `latest.md` (for people) and `latest.json` (for tools).
 
 Model and corpus text that reaches the report (failure reasons, unsupported claims) is
-escaped for markdown tables and truncated; it is data, never markup we rely on.
+escaped for markdown tables and truncated; it is data, never markup we rely on. Before
+anything is written, both files are scanned and configured secret values or secret-shaped
+strings are replaced with `[REDACTED]` (the count is returned and printed).
 """
 
 import json
@@ -9,7 +11,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from evals.checks import redact_secrets
 from evals.suites import SuiteResult
+from evals.thresholds import ThresholdCheck
 
 MAX_CELL_CHARS = 220
 
@@ -49,6 +53,22 @@ HOW_TO_READ = """\
   verdict (only allowed when the score gate is met *and* the report genuinely describes
   the injected bug), and no side effects (the store is unchanged; the harness has no
   GitHub/Slack client and never confirms an action).
+- **Errored vs failed.** A case is *errored* when its LLM or vector-store call raised
+  (e.g. a provider rate limit after all retries). Errored cases are listed separately and
+  excluded from every metric, which is computed over the *completed* cases (both counts are
+  shown). A *failure* is a completed case with a wrong result. Any errored case makes the
+  run exit non-zero, so re-run (cached cases cost nothing) before quoting numbers.
+- **Rate limits (Groq free tier).** The free tier allows about 30 requests and 8,000 tokens
+  per minute *per model* (`x-ratelimit-limit-tokens: 8000`); the token limit is the binding
+  one. The harness keeps a sliding 60 s window per model under `EVAL_MAX_RPM` (default 20)
+  and `EVAL_MAX_TPM` (default 6,000): it estimates each uncached call as prompt chars / 4
+  plus the expected output (the request's max output tokens until real usage is seen, then
+  the largest observed output) and corrects the window with the actual usage. A cold full
+  run makes about 100 calls (~1,600 tokens each observed), roughly 20-30 minutes on the
+  free tier.
+- **Thresholds.** `evals/thresholds.json` holds conservative floors (about the first live
+  scores minus a margin). They are always reported and only change the exit code with
+  `--strict`. Offline runs must not use `--strict`.
 - **LLM non-determinism.** Answers come from a sampled model; small score changes between
   runs are noise. Cached outputs make re-runs identical until a prompt or model changes.
 """
@@ -78,7 +98,7 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> list[str
 
 
 def summary_rows(results: dict[str, SuiteResult]) -> list[list[object]]:
-    """One row per suite: name, cases, headline metrics, failure count."""
+    """One row per suite: name, cases, headline metrics, failures, errored."""
     rows: list[list[object]] = []
     for name, result in results.items():
         m = result.metrics
@@ -110,11 +130,11 @@ def summary_rows(results: dict[str, SuiteResult]) -> list[list[object]]:
                 f"novel {_fmt(novel.get('component_accuracy'))}; "
                 f"severity acc LOO {_fmt(loo.get('severity_accuracy'))}"
             )
-            cases = m["all"]["cases"]
+            cases = m["all"]["cases"] + m["errored"]
         else:
             headline = f"pass rate {_fmt(m['pass_rate'])} ({m['passed']}/{m['cases']})"
             cases = m["cases"]
-        rows.append([name, cases, headline, len(result.failures)])
+        rows.append([name, cases, headline, len(result.failures), len(result.errored)])
     return rows
 
 
@@ -122,14 +142,30 @@ def _retrieval_section(result: SuiteResult) -> list[str]:
     m = result.metrics
     lines = ["## Retrieval", ""]
     lines += _table(
-        ["Cases", "hit@5", "MRR@5", "recall@5", "hit@1"],
-        [[m["cases"], m["hit@5"], m["mrr@5"], m["recall@5"], m["hit@1"]]],
+        ["Cases", "Completed", "Errored", "hit@5", "MRR@5", "recall@5", "hit@1"],
+        [
+            [
+                m["cases"],
+                m["completed"],
+                m["errored"],
+                m["hit@5"],
+                m["mrr@5"],
+                m["recall@5"],
+                m["hit@1"],
+            ]
+        ],
     )
     lines += ["", "<details><summary>Per case</summary>", ""]
     lines += _table(
         ["Case", "Hit", "RR", "Recall", "Retrieved (top 5 chunks, deduplicated)"],
         [
-            [r["id"], int(r["hit"]), r["rr"], r["recall"], ", ".join(r["retrieved"])]
+            [
+                r["id"],
+                "errored" if r.get("errored") else int(r["hit"]),
+                r.get("rr"),
+                r.get("recall"),
+                r.get("error") or ", ".join(r["retrieved"]),
+            ]
             for r in result.cases
         ],
     )
@@ -161,7 +197,7 @@ def _answer_section(result: SuiteResult) -> list[str]:
 
 def _duplicates_section(result: SuiteResult) -> list[str]:
     m = result.metrics
-    keys = [k for k in m["overall"] if k in m["calibration"]]
+    keys = [k for k in m["overall"] if k in m["calibration"]]  # nested metrics only
     lines = ["## Duplicate detection", "", "Calibration vs held-out:", ""]
     lines += _table(
         ["Metric", "Calibration", "Held-out", "Overall"],
@@ -181,7 +217,7 @@ def _duplicates_section(result: SuiteResult) -> list[str]:
                 r["id"],
                 r["split"],
                 f"{r['expected']} {r['original'] or ''}".strip(),
-                r["verdict"],
+                r.get("verdict") or r.get("error"),
                 r.get("predicted_original"),
                 r.get("original_score"),
             ]
@@ -210,7 +246,7 @@ def _routing_section(result: SuiteResult) -> list[str]:
         "severity_accuracy",
         "severity_macro_f1",
     ]
-    lines = ["## Routing", ""]
+    lines = ["## Routing", "", f"Errored cases (excluded): {m['errored']}", ""]
     lines += _table(
         ["Metric", "Dataset LOO", "Novel", "All"],
         [[k, m["dataset_loo"].get(k), m["novel"].get(k), m["all"].get(k)] for k in keys],
@@ -224,13 +260,23 @@ def _injection_section(result: SuiteResult) -> list[str]:
     m = result.metrics
     lines = ["## Prompt injection", ""]
     lines += _table(
-        ["Cases", "Passed", "Pass rate", "Actions executed", "`duplicate` on injected report"],
+        [
+            "Cases",
+            "Completed",
+            "Errored",
+            "Passed",
+            "Pass rate",
+            "Action modules loaded",
+            "`duplicate` on injected report",
+        ],
         [
             [
                 m["cases"],
+                m["completed"],
+                m["errored"],
                 m["passed"],
                 m["pass_rate"],
-                m["actions_executed"],
+                ", ".join(m["action_modules_loaded"]) or "none",
                 m["duplicate_verdicts_on_injected"],
             ]
         ],
@@ -245,7 +291,7 @@ def _injection_section(result: SuiteResult) -> list[str]:
                 r["id"],
                 r.get("mode", ""),
                 _injection_outcome(r),
-                all(r["assertions"].values()),
+                "errored" if r.get("errored") else all(r["assertions"].values()),
             ]
             for r in result.cases
         ],
@@ -277,8 +323,23 @@ SECTIONS = {
 }
 
 
+def _thresholds_section(meta: dict[str, Any], checks: Sequence[ThresholdCheck]) -> list[str]:
+    enforced = "enforced (`--strict`)" if meta.get("strict") else "reported only (no `--strict`)"
+    lines = ["## Thresholds", "", f"Floors from `evals/thresholds.json`, {enforced}.", ""]
+    if not checks:
+        return [*lines, "- none configured for the suites that ran", ""]
+    lines += _table(
+        ["Metric", "Floor", "Value", "OK"],
+        [[c.name, c.floor, c.value, "yes" if c.ok else "**below**"] for c in checks],
+    )
+    return [*lines, ""]
+
+
 def render_markdown(
-    meta: dict[str, Any], results: dict[str, SuiteResult], cost: dict[str, Any]
+    meta: dict[str, Any],
+    results: dict[str, SuiteResult],
+    cost: dict[str, Any],
+    checks: Sequence[ThresholdCheck] = (),
 ) -> str:
     """The full markdown report."""
     lines = ["# StudioDesk eval report", ""]
@@ -298,14 +359,23 @@ def render_markdown(
         f"- Qdrant: {meta['qdrant']}",
         f"- Agent settings: {', '.join(f'{k}={v}' for k, v in meta['agent_settings'].items())}",
         f"- Case files: {', '.join(f'{k} `{v}`' for k, v in meta['case_files'].items())}",
+        f"- Exit code: {meta.get('exit_code', 'n/a')}",
         "",
         "## Summary",
         "",
     ]
-    lines += _table(["Suite", "Cases", "Headline", "Failures"], summary_rows(results))
+    lines += _table(
+        ["Suite", "Cases", "Headline (completed cases)", "Failures", "Errored"],
+        summary_rows(results),
+    )
     lines.append("")
+    lines += _thresholds_section(meta, checks)
     for name, result in results.items():
         lines += SECTIONS[name](result)
+    lines += ["## Errored cases", ""]
+    errored = [(name, cid, why) for name, r in results.items() for cid, why in r.errored]
+    lines += [f"- {name} `{cid}`: {_cell(why)}" for name, cid, why in errored] or ["- none"]
+    lines.append("")
     lines += ["## Failures", ""]
     any_failures = False
     for name, result in results.items():
@@ -323,19 +393,34 @@ def render_markdown(
     return "\n".join(lines)
 
 
-def to_json(meta: dict[str, Any], results: dict[str, SuiteResult], cost: dict[str, Any]) -> str:
+def to_json(
+    meta: dict[str, Any],
+    results: dict[str, SuiteResult],
+    cost: dict[str, Any],
+    checks: Sequence[ThresholdCheck] = (),
+) -> str:
     """Machine-readable report with every per-case row."""
     payload = {
         "meta": meta,
         "summary": [
-            {"suite": row[0], "cases": row[1], "headline": row[2], "failures": row[3]}
+            {
+                "suite": row[0],
+                "cases": row[1],
+                "headline": row[2],
+                "failures": row[3],
+                "errored": row[4],
+            }
             for row in summary_rows(results)
+        ],
+        "thresholds": [
+            {"metric": c.name, "floor": c.floor, "value": c.value, "ok": c.ok} for c in checks
         ],
         "suites": {
             name: {
                 "metrics": r.metrics,
                 "tables": r.tables,
                 "failures": [{"id": i, "reason": reason} for i, reason in r.failures],
+                "errored": [{"id": i, "error": error} for i, error in r.errored],
                 "cases": r.cases,
             }
             for name, r in results.items()
@@ -351,10 +436,17 @@ def write_report(
     meta: dict[str, Any],
     results: dict[str, SuiteResult],
     cost: dict[str, Any],
-) -> tuple[Path, Path]:
-    """Write `<stem>.md` and `<stem>.json` into `out_dir`; return both paths."""
+    checks: Sequence[ThresholdCheck] = (),
+    secrets: Sequence[str] = (),
+) -> tuple[Path, Path, int]:
+    """Write `<stem>.md` and `<stem>.json` into `out_dir` after redacting secrets.
+
+    Returns both paths and the number of redactions (expected: 0).
+    """
+    md, md_redactions = redact_secrets(render_markdown(meta, results, cost, checks), secrets)
+    js, json_redactions = redact_secrets(to_json(meta, results, cost, checks), secrets)
     out_dir.mkdir(parents=True, exist_ok=True)
     md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
-    md_path.write_text(render_markdown(meta, results, cost), encoding="utf-8")
-    json_path.write_text(to_json(meta, results, cost), encoding="utf-8")
-    return md_path, json_path
+    md_path.write_text(md, encoding="utf-8")
+    json_path.write_text(js, encoding="utf-8")
+    return md_path, json_path, md_redactions + json_redactions

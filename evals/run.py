@@ -1,7 +1,8 @@
 """Run the StudioDesk eval suites and write a markdown + JSON report.
 
     uv run python -m evals.run [--suite all|retrieval|answer|duplicates|routing|injection]
-                               [--offline] [--qdrant memory|cloud] [--max-rpm N] [--no-cache]
+                               [--offline] [--qdrant memory|cloud] [--max-rpm N]
+                               [--max-tpm N] [--no-cache] [--strict]
 
 Default (live): Settings from the environment / `.env`, the real pinned MiniLM embedder, a
 fresh in-memory Qdrant with the whole synthetic dataset ingested, the configured LLM
@@ -11,6 +12,14 @@ provider as answerer and `EVAL_JUDGE_MODEL` (same provider) as groundedness judg
 `--qdrant cloud` searches the collection at `QDRANT_URL` read-only (no ingest, no writes).
 `--offline` uses a fake LLM and a hashing embedder, needs no keys or network, and writes
 `evals/reports/offline.md/json` (gitignored) so it can never overwrite a real report.
+
+Rate limits: each model gets its own sliding 60 s window capped at `EVAL_MAX_RPM` requests
+and `EVAL_MAX_TPM` tokens (Groq's free tier allows 8,000 tokens per minute per model).
+
+Exit code: 0 when every case completed; 1 if any case errored (e.g. the provider was
+unavailable), or, with `--strict`, if a completed metric is below its floor in
+`evals/thresholds.json`; 2 on a configuration error. CI's offline smoke must not use
+`--strict` (offline scores are meaningless).
 
 Secrets are never printed: only model names and counts are reported.
 """
@@ -33,7 +42,14 @@ from qdrant_client import QdrantClient
 from evals.cases import CASES_DIR, CaseSet, load_cases
 from evals.checks import configured_secrets
 from evals.fakes import OFFLINE_EMBEDDER, OFFLINE_MODEL, HashingEmbedder, OfflineLLM
-from evals.llm_cache import CACHE_DIR, CachedLLM, CallStats, ResponseCache, Throttle, capture_tokens
+from evals.llm_cache import (
+    CACHE_DIR,
+    CachedLLM,
+    CallStats,
+    RateLimiter,
+    ResponseCache,
+    capture_tokens,
+)
 from evals.report import write_report
 from evals.suites import (
     EvalStack,
@@ -46,6 +62,7 @@ from evals.suites import (
     run_retrieval,
     run_routing,
 )
+from evals.thresholds import THRESHOLDS_PATH, check_thresholds, load_thresholds
 from studiodesk.config import Settings
 from studiodesk.data.loader import load_dataset
 from studiodesk.embeddings import Embedder, SentenceTransformerEmbedder
@@ -79,6 +96,8 @@ class EvalSettings(BaseSettings):
 
     eval_judge_model: str | None = Field(default=None, min_length=1, max_length=128)
     eval_max_rpm: int = Field(default=20, ge=1, le=1_000)
+    # Groq free tier: 8,000 tokens/minute per model; stay below it with a margin.
+    eval_max_tpm: int = Field(default=6_000, ge=100, le=10_000_000)
 
 
 class HarnessError(RuntimeError):
@@ -96,6 +115,11 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--offline", action="store_true", help="fake LLM + hashing embedder")
     parser.add_argument("--qdrant", choices=("memory", "cloud"), default="memory")
     parser.add_argument("--max-rpm", type=int, default=None, help="override EVAL_MAX_RPM")
+    parser.add_argument("--max-tpm", type=int, default=None, help="override EVAL_MAX_TPM")
+    parser.add_argument(
+        "--strict", action="store_true", help="exit 1 if a metric is below evals/thresholds.json"
+    )
+    parser.add_argument("--thresholds", type=Path, default=THRESHOLDS_PATH)
     parser.add_argument(
         "--no-cache", action="store_true", help="ignore cached LLM outputs (still refreshes them)"
     )
@@ -107,10 +131,14 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.max_rpm is not None and args.max_rpm <= 0:
         parser.error("--max-rpm must be positive")
+    if args.max_tpm is not None and args.max_tpm <= 0:
+        parser.error("--max-tpm must be positive")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
     if args.offline and args.qdrant == "cloud":
         parser.error("--offline cannot be combined with --qdrant cloud")
+    if args.offline and args.strict:
+        parser.error("--strict is meaningless offline (fake scores); do not use it in CI")
     return args
 
 
@@ -141,6 +169,29 @@ def git_sha() -> str:
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
     return f"{sha}+dirty" if dirty else sha
+
+
+def sanitise_command(argv: Sequence[str]) -> str:
+    """The command line for the report, without local absolute paths.
+
+    Paths inside the repo become repo-relative; other absolute paths keep only their last
+    component (`<abs>/name`), so home directories and temp dirs never reach the report.
+    """
+    parts = ["uv", "run", "python", "-m", "evals.run"]
+    for arg in argv:
+        value = arg
+        prefix = ""
+        if arg.startswith("--") and "=" in arg:
+            prefix, value = arg.split("=", 1)
+            prefix += "="
+        path = Path(value)
+        if path.is_absolute():
+            try:
+                value = str(path.resolve().relative_to(REPO_ROOT))
+            except ValueError:
+                value = f"<abs>/{path.name}"
+        parts.append(prefix + value)
+    return " ".join(parts)
 
 
 def judge_model_for(settings: Settings, override: str | None) -> str:
@@ -196,10 +247,10 @@ def build_llms(
     stats: CallStats,
     stack: ExitStack,
 ) -> tuple[LLMClient, LLMClient, str, str]:
-    """Answerer and judge clients (cached + throttled when live) and their labels."""
+    """Answerer and judge clients (cached + rate limited when live) and their labels."""
     if args.offline:
         fakes = [
-            CachedLLM(OfflineLLM(), OFFLINE_MODEL, cache=None, throttle=None, stats=stats)
+            CachedLLM(OfflineLLM(), OFFLINE_MODEL, cache=None, limiter=None, stats=stats)
             for _ in range(2)
         ]
         return fakes[0], fakes[1], OFFLINE_MODEL, OFFLINE_MODEL
@@ -216,17 +267,24 @@ def build_llms(
     stack.callback(answerer.close)
     stack.callback(judge.close)
     cache = ResponseCache(args.cache_dir)
-    throttle = Throttle(args.max_rpm or eval_settings.eval_max_rpm)
+    answer_model = settings.resolved_llm_model
+    # Provider limits are per model: one window per distinct model (shared if identical).
+    limiters = {
+        model: RateLimiter(
+            args.max_rpm or eval_settings.eval_max_rpm,
+            args.max_tpm or eval_settings.eval_max_tpm,
+        )
+        for model in (answer_model, judge_model)
+    }
     common: dict[str, Any] = {
         "cache": cache,
-        "throttle": throttle,
         "stats": stats,
         "read_cache": not args.no_cache,
+        "max_output_tokens": llm_settings.llm_max_tokens,
     }
-    answer_model = settings.resolved_llm_model
     return (
-        CachedLLM(answerer, answer_model, **common),
-        CachedLLM(judge, judge_model, **common),
+        CachedLLM(answerer, answer_model, limiter=limiters[answer_model], **common),
+        CachedLLM(judge, judge_model, limiter=limiters[judge_model], **common),
         f"{settings.llm_provider}:{answer_model}",
         f"{settings.llm_provider}:{judge_model}",
     )
@@ -269,12 +327,16 @@ def preflight(args: argparse.Namespace, settings: Settings, suites: Sequence[str
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the evals; returns 0 on success, 2 on a configuration error."""
+    """Run the evals; see the module docstring for the exit codes."""
     args = parse_args(argv)
     suites = selected_suites(args.suite)
     started = time.perf_counter()
     try:
-        cases = load_cases(args.cases_dir)
+        try:
+            cases = load_cases(args.cases_dir)
+            thresholds = load_thresholds(args.thresholds)
+        except ValueError as exc:  # names the file and line, never secrets
+            raise HarnessError(str(exc)) from exc
         # Offline runs are hermetic: no .env, so no keys are even loaded.
         settings = Settings(_env_file=None) if args.offline else Settings()
         eval_settings = EvalSettings(_env_file=None) if args.offline else EvalSettings()
@@ -303,12 +365,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    command = "uv run python -m evals.run " + " ".join(argv if argv is not None else sys.argv[1:])
+    command = sanitise_command(argv if argv is not None else sys.argv[1:])
     meta = {
         "date": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M"),
         "git_sha": git_sha(),
         "offline": args.offline,
-        "command": command.strip(),
+        "command": command,
         "suites": suites,
         "answerer": answerer_label,
         "judge": judge_label,
@@ -325,18 +387,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         "case_files": cases.fingerprints,
         "limit_per_suite": args.limit,
     }
+    offline_na = "n/a (offline)"
     cost = {
         **stats.as_dict(),
-        "max_rpm": "n/a (offline)" if args.offline else args.max_rpm or eval_settings.eval_max_rpm,
+        "max_rpm_per_model": offline_na
+        if args.offline
+        else args.max_rpm or eval_settings.eval_max_rpm,
+        "max_tpm_per_model": offline_na
+        if args.offline
+        else args.max_tpm or eval_settings.eval_max_tpm,
         "elapsed_s": round(time.perf_counter() - started, 1),
     }
+    checks = check_thresholds(results, thresholds)
+    errored = sum(len(r.errored) for r in results.values())
+    below = [c for c in checks if not c.ok]
+    exit_code = 1 if errored or (args.strict and below) else 0
+    meta["strict"] = args.strict
+    meta["exit_code"] = exit_code
     stem = "offline" if args.offline else "latest"
-    md_path, json_path = write_report(args.output_dir, stem, meta, results, cost)
+    md_path, json_path, redactions = write_report(
+        args.output_dir, stem, meta, results, cost, checks, stack.secrets
+    )
+    if redactions:
+        print(
+            f"warning: redacted {redactions} secret-like string(s) from the report", file=sys.stderr
+        )
     for name, result in results.items():
-        print(f"{name}: {len(result.failures)} failure(s); metrics: {result.metrics}")
+        print(
+            f"{name}: {len(result.failures)} failure(s), {len(result.errored)} errored; "
+            f"metrics: {result.metrics}"
+        )
     print(f"cost: {cost}")
+    if not args.offline:
+        for check in below:
+            print(f"below floor: {check.name} = {check.value} < {check.floor}")
+    if errored:
+        print(f"{errored} case(s) errored; see the report. Exit code 1.", file=sys.stderr)
+    elif args.strict and below:
+        print(f"{len(below)} metric(s) below their floor (--strict). Exit code 1.", file=sys.stderr)
     print(f"report: {md_path} and {json_path.name}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
