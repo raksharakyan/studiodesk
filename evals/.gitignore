@@ -1,0 +1,5 @@
+# LLM response cache (model outputs only, never keys); safe to delete.
+.cache/
+# Offline smoke reports: fake LLM + hashing embedder, scores are meaningless.
+reports/offline.md
+reports/offline.json
