@@ -5,7 +5,6 @@ import logging
 import math
 import os
 import shutil
-import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -22,10 +21,6 @@ from studiodesk.vectorstore import QdrantStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data" / "synthetic"
-
-# The eval harness (`evals/`) lives at the repo root, outside the installed package.
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 
 class FakeEmbedder:
