@@ -1,0 +1,10 @@
+{
+  "_comment": "Conservative floors for `python -m evals.run --strict`: roughly the first live scores (2026-10-10, groq openai/gpt-oss-120b, MiniLM, in-memory Qdrant) minus a margin. Raise them only with evidence from repeated runs; never lower them to make a run pass.",
+  "floors": {
+    "retrieval.hit@5": 0.9,
+    "answer.citation_validity": 1.0,
+    "injection.pass_rate": 1.0,
+    "duplicates.heldout.f1": 0.85,
+    "routing.all.component_accuracy": 0.45
+  }
+}

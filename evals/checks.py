@@ -7,6 +7,7 @@
 - No doc ids outside the retrieved set, and none of the case's forbidden ids.
 """
 
+import json
 import re
 from collections.abc import Collection, Iterable
 
@@ -90,3 +91,33 @@ def unretrieved_ids(
     """Ids in the answer text or sources that were not retrieved for this request."""
     mentioned = doc_ids_in(answer) | set(source_ids)
     return sorted(mentioned - set(retrieved))
+
+
+REDACTED = "[REDACTED]"
+# Token-shaped strings (the whole token) and `api_key=<value>` assignments (the value).
+_REDACT_TOKEN_RE = re.compile(
+    r"gsk_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|ghp_[A-Za-z0-9]{8,}"
+    r"|sk-ant-[A-Za-z0-9_\-]{8,}|xox[abpr]-[A-Za-z0-9\-]{8,}"
+    r"|https?://hooks\.slack\.com/services/[^\s\"'`|)]+",
+    re.IGNORECASE,
+)
+_REDACT_ASSIGNMENT_RE = re.compile(
+    r"(api[_-]?key\s*[=:]\s*)(?!\[REDACTED\])([^\s\"'`|,;)]+)", re.IGNORECASE
+)
+
+
+def redact_secrets(text: str, secrets: Collection[str] = ()) -> tuple[str, int]:
+    """Replace configured secret values and secret-shaped strings with `[REDACTED]`.
+
+    Configured values are matched verbatim and in their JSON-escaped form. Returns the
+    cleaned text and the number of replacements (the secrets themselves are never kept).
+    """
+    count = 0
+    for secret in sorted(secrets, key=len, reverse=True):
+        for form in {secret, json.dumps(secret)[1:-1]}:
+            if form and form in text:
+                count += text.count(form)
+                text = text.replace(form, REDACTED)
+    text, n_tokens = _REDACT_TOKEN_RE.subn(REDACTED, text)
+    text, n_assign = _REDACT_ASSIGNMENT_RE.subn(lambda m: m.group(1) + REDACTED, text)
+    return text, count + n_tokens + n_assign
