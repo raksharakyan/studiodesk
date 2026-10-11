@@ -17,14 +17,16 @@ const TRANSCRIPT_MAX_ITEMS = 200;
 // voice agent right before a click is never confirmed by accident.
 const CONFIRM_ARM_DELAY_MS = 1200;
 
-// Audio worklets loaded from the same pinned SDK version as the script in voice.html, so the
-// CSP script-src does not need blob: or data: (the SDK's default worklet loading uses those).
-// Keep SDK_VERSION in sync with the <script> tag in voice.html.
+// Audio worklets vendored from the same pinned SDK version as the script in voice.html and
+// served from this origin (see static/vendor/elevenlabs-client-<version>/README.txt for the
+// source and sha256 hashes). Loading them by URL means the CSP script-src does not need blob:
+// or data: (the SDK's default worklet loading uses those), and same-origin files need no SRI.
+// Keep SDK_VERSION in sync with the <script> tag in voice.html and the vendor directory name.
 const SDK_VERSION = "1.27.0";
-const SDK_BASE = `https://cdn.jsdelivr.net/npm/@elevenlabs/client@${SDK_VERSION}`;
+const WORKLET_BASE = `/static/vendor/elevenlabs-client-${SDK_VERSION}`;
 const WORKLET_PATHS = Object.freeze({
-  rawAudioProcessor: `${SDK_BASE}/worklets/rawAudioProcessor.js`,
-  audioConcatProcessor: `${SDK_BASE}/worklets/audioConcatProcessor.js`,
+  rawAudioProcessor: `${WORKLET_BASE}/rawAudioProcessor.js`,
+  audioConcatProcessor: `${WORKLET_BASE}/audioConcatProcessor.js`,
 });
 
 /** Names must match voice/agent.json exactly (qa-agent checks parity). */
