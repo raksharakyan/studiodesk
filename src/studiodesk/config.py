@@ -15,6 +15,20 @@ ELEVENLABS_AGENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 VOICE_LLM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
+# The sample values in `.env.example`. A `.env` copied without filling them in must behave
+# as "not configured" (never send a placeholder as a credential or call a fake host).
+# GITHUB_REPO=your-org/your-repo is not listed: an empty repo is a validation error, and
+# filing is off anyway while GITHUB_TOKEN is its placeholder.
+PLACEHOLDER_VALUES = frozenset(
+    {
+        "gsk_your-groq-key-here",
+        "sk-ant-your-key-here",
+        "https://your-cluster.cloud.qdrant.io:6333",
+        "your-qdrant-api-key",
+        "github_pat_your-token-here",
+        "your-elevenlabs-api-key",
+    }
+)
 DEFAULT_LLM_MODELS = {
     "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-sonnet-5-5",
@@ -202,6 +216,8 @@ class Settings(BaseSettings):
     @field_validator(
         "groq_api_key",
         "anthropic_api_key",
+        "qdrant_url",
+        "qdrant_api_key",
         "github_token",
         "slack_webhook_url",
         "llm_model",
@@ -210,9 +226,13 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _empty_integration_value_is_unset(cls, value: object) -> object:
-        """Treat an empty integration value (e.g. `SLACK_WEBHOOK_URL=`) as not configured."""
-        return None if isinstance(value, str) and not value.strip() else value
+    def _empty_or_placeholder_is_unset(cls, value: object) -> object:
+        """Treat an empty value (e.g. `SLACK_WEBHOOK_URL=`) or an unchanged `.env.example`
+        placeholder (e.g. `your-elevenlabs-api-key`) as not configured."""
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if isinstance(raw, str) and (not raw.strip() or raw.strip() in PLACEHOLDER_VALUES):
+            return None
+        return value
 
     @field_validator("slack_webhook_url")
     @classmethod
@@ -231,12 +251,6 @@ class Settings(BaseSettings):
         ):
             raise ValueError(f"slack_webhook_url must be an https://{SLACK_WEBHOOK_HOST}/ URL")
         return value
-
-    @field_validator("qdrant_url", mode="before")
-    @classmethod
-    def _empty_qdrant_url_is_unset(cls, value: object) -> object:
-        """Treat `QDRANT_URL=` (empty) as not configured."""
-        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("qdrant_url")
     @classmethod
