@@ -501,10 +501,68 @@ def test_local_scripts_and_styles_are_same_origin(voice_html: _HTMLScan) -> None
         assert not urlsplit(href).netloc, f"external stylesheet/link: {href}"
 
 
-def test_sdk_version_matches_worklet_version_in_js() -> None:
+def _resolve_worklet_paths(js: str) -> dict[str, str]:
+    """Worklet URLs from WORKLET_PATHS in voice.js, with top-level string constants expanded."""
+    block = re.search(r"const WORKLET_PATHS = Object\.freeze\(\{(.*?)\}\);", js, re.DOTALL)
+    assert block is not None, "WORKLET_PATHS not found in voice.js"
+    consts = dict(re.findall(r'^const ([A-Z][A-Z0-9_]*) = [`"]([^`"]*)[`"];', js, re.MULTILINE))
+    paths: dict[str, str] = {}
+    for name, value in re.findall(r'(\w+):\s*[`"]([^`"]+)[`"]', block.group(1)):
+        for _ in range(3):
+            for const, const_value in consts.items():
+                value = value.replace(f"${{{const}}}", const_value)
+        paths[name] = value
+    return paths
+
+
+def test_worklets_are_vendored_or_pinned_to_the_sdk_version() -> None:
+    """Tolerant until the worklets are vendored: same-origin /static/vendor/ files that
+    exist, or CDN URLs pinned to the same SDK version as the <script> tag in voice.html."""
     html = (STATIC_DIR / "voice.html").read_text(encoding="utf-8")
     js = (STATIC_DIR / "voice.js").read_text(encoding="utf-8")
-    [html_version] = re.findall(r"@elevenlabs/client@(\d+\.\d+\.\d+)/", html)
-    match = re.search(r'const SDK_VERSION = "(\d+\.\d+\.\d+)";', js)
-    assert match is not None
-    assert match.group(1) == html_version
+    paths = _resolve_worklet_paths(js)
+    assert set(paths) == {"rawAudioProcessor", "audioConcatProcessor"}
+    sdk_versions = re.findall(r"@elevenlabs/client@(\d+\.\d+\.\d+)/", html)
+    for name, url in paths.items():
+        assert "${" not in url, f"unresolved template in {name}: {url}"
+        parts = urlsplit(url)
+        if not parts.netloc:
+            assert url.startswith("/static/vendor/"), f"{name}: {url}"
+            assert ".." not in url
+            vendored = STATIC_DIR / url.removeprefix("/static/")
+            assert vendored.is_file(), f"{name}: vendored worklet missing at {vendored}"
+            # The vendored copy must come from the same SDK version as the <script> tag.
+            dir_versions = re.findall(r"elevenlabs-client-(\d+\.\d+\.\d+)/", url)
+            assert dir_versions == sdk_versions, f"{name} vendored from another SDK version"
+        else:
+            assert f"{parts.scheme}://{parts.netloc}" == "https://cdn.jsdelivr.net", url
+            [url_version] = re.findall(r"@elevenlabs/client@(\d+\.\d+\.\d+)/", url)
+            assert sdk_versions == [url_version], f"{name} not pinned to the SDK version"
+
+
+def test_worklet_parser_handles_vendored_form() -> None:
+    js = (
+        "const WORKLET_PATHS = Object.freeze({\n"
+        '  rawAudioProcessor: "/static/vendor/elevenlabs/rawAudioProcessor.js",\n'
+        "  audioConcatProcessor: `/static/vendor/elevenlabs/audioConcatProcessor.js`,\n"
+        "});\n"
+    )
+    assert _resolve_worklet_paths(js) == {
+        "rawAudioProcessor": "/static/vendor/elevenlabs/rawAudioProcessor.js",
+        "audioConcatProcessor": "/static/vendor/elevenlabs/audioConcatProcessor.js",
+    }
+
+
+def test_vendored_worklets_served_same_origin_with_headers(
+    store: QdrantStore, fake_embedder: Embedder
+) -> None:
+    js = (STATIC_DIR / "voice.js").read_text(encoding="utf-8")
+    local = [u for u in _resolve_worklet_paths(js).values() if u.startswith("/static/vendor/")]
+    if not local:
+        pytest.skip("worklets not vendored yet (still loaded from the pinned CDN)")
+    with app_client(store, fake_embedder, voice=None) as client:
+        for url in local:
+            response = client.get(url)
+            assert response.status_code == 200, url
+            assert "javascript" in response.headers["content-type"], url
+            assert_security_headers(response)
