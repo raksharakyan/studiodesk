@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>StudioDesk Voice</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <!-- ElevenLabs browser SDK, pinned to an exact version with Subresource Integrity.
+       The self-contained IIFE bundle is used (not /+esm) so the whole SDK is covered by one hash.
+       To upgrade: change the version and recompute the sha384 hash of dist/lib.iife.js. -->
+  <script defer
+          src="https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.27.0/dist/lib.iife.js"
+          integrity="sha384-ekuWfdL0BkeVAWv24yeCWtzVwYDQd4pCkPL5TKVDLmwDBeVxS2cTwo0wfsUNaFkJ"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
+  <script type="module" src="/static/voice.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <h1>StudioDesk Voice</h1>
+    <p class="tagline">Talk to the StudioDesk support and QA agent for Starfall Outpost, or type a question.</p>
+  </header>
+
+  <main id="main" class="layout" tabindex="-1">
+    <section class="panel" aria-labelledby="voice-heading">
+      <h2 id="voice-heading">Voice conversation</h2>
+      <p id="mic-explainer" class="hint">
+        Voice mode needs your microphone so the agent can hear you. Your browser will ask for
+        permission when you start. Audio is streamed to ElevenLabs only while the conversation
+        is on; press the button again to stop. Issues are never filed by voice: you confirm them
+        on this page.
+      </p>
+      <div class="voice-controls">
+        <button type="button" id="voice-toggle" class="btn btn-primary voice-toggle"
+                aria-pressed="false" aria-describedby="mic-explainer">
+          <span class="toggle-state" aria-hidden="true" data-role="toggle-state">Off</span>
+          <span data-role="toggle-label">Start voice conversation</span>
+        </button>
+        <div class="voice-state">
+          <p id="voice-status" class="status-line" role="status" aria-live="polite">
+            Status: <span data-role="status-text">Disconnected</span>
+          </p>
+          <p class="mode-line" data-mode="idle" id="voice-mode">
+            <span class="mode-dot" aria-hidden="true"></span>
+            <span data-role="mode-text">Agent idle</span>
+          </p>
+        </div>
+      </div>
+      <p id="voice-error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="panel" aria-labelledby="transcript-heading">
+      <h2 id="transcript-heading">Transcript</h2>
+      <p id="transcript-empty" class="hint">The conversation will appear here once voice mode is on.</p>
+      <ol id="transcript" class="transcript" aria-live="polite" aria-relevant="additions"
+          aria-labelledby="transcript-heading"></ol>
+    </section>
+
+    <section class="panel" aria-labelledby="ask-heading">
+      <h2 id="ask-heading">Ask by typing</h2>
+      <form id="ask-form" class="form" novalidate>
+        <label for="ask-question">Your question</label>
+        <textarea id="ask-question" name="question" rows="3" maxlength="1000" required
+                  aria-describedby="ask-question-hint"></textarea>
+        <p id="ask-question-hint" class="hint">Up to 1000 characters. Example: Why does my save fail to load after the latest patch?</p>
+        <button type="submit" class="btn btn-primary">Ask StudioDesk</button>
+      </form>
+      <p id="ask-status" class="status-line" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="answer-heading" id="answer-panel">
+      <h2 id="answer-heading">Answer and sources</h2>
+      <div id="answer-region" aria-live="polite">
+        <p id="answer-empty" class="hint">Answers from voice or typed questions appear here.</p>
+        <div id="answer-content" hidden>
+          <h3 id="answer-question-heading">Answer</h3>
+          <p id="answer-question" class="meta"></p>
+          <p id="answer-text" class="answer-text"></p>
+          <p id="answer-notes" class="note" hidden></p>
+          <h3 id="sources-heading">Sources</h3>
+          <p id="sources-empty" class="hint" hidden>No sources were cited.</p>
+          <ol id="sources" class="card-list" aria-labelledby="sources-heading"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="bug-heading" id="bug-panel">
+      <h2 id="bug-heading">Bug check</h2>
+      <p class="hint">Describe a bug by voice, or use the form. StudioDesk looks for duplicates and drafts an issue that is filed only if you press Confirm.</p>
+
+      <details class="typed-bug">
+        <summary>Check a bug report by typing</summary>
+        <form id="bug-form" class="form" novalidate>
+          <label for="bug-title">Title</label>
+          <input id="bug-title" name="title" type="text" minlength="5" maxlength="200" required
+                 aria-describedby="bug-title-hint">
+          <p id="bug-title-hint" class="hint">5 to 200 characters.</p>
+
+          <label for="bug-description">Description</label>
+          <textarea id="bug-description" name="description" rows="4" maxlength="4000" required></textarea>
+
+          <div class="form-row">
+            <div>
+              <label for="bug-platform">Platform</label>
+              <select id="bug-platform" name="platform" required>
+                <option value="pc">PC</option>
+                <option value="ps5">PlayStation 5</option>
+                <option value="xbox_series">Xbox Series</option>
+                <option value="switch">Nintendo Switch</option>
+              </select>
+            </div>
+            <div>
+              <label for="bug-version">Game version</label>
+              <input id="bug-version" name="version" type="text" inputmode="decimal"
+                     pattern="\d+\.\d+\.\d+" maxlength="32" required placeholder="1.4.0"
+                     aria-describedby="bug-version-hint">
+              <p id="bug-version-hint" class="hint">Format: major.minor.patch, for example 1.4.0.</p>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary">Check for duplicates</button>
+        </form>
+      </details>
+
+      <p id="bug-status" class="status-line" role="status" aria-live="polite"></p>
+
+      <div id="bug-result" hidden>
+        <h3>Verdict</h3>
+        <p><strong id="bug-verdict" class="verdict"></strong></p>
+        <p id="bug-match" class="meta" hidden></p>
+
+        <h3 id="candidates-heading">Similar reports</h3>
+        <p id="candidates-empty" class="hint" hidden>No similar reports were found.</p>
+        <ol id="candidates" class="card-list" aria-labelledby="candidates-heading"></ol>
+
+        <h3>Routing</h3>
+        <dl class="kv">
+          <dt>Component</dt><dd id="routing-component"></dd>
+          <dt>Severity</dt><dd id="routing-severity"></dd>
+          <dt>Labels</dt><dd><ul id="routing-labels" class="tags" aria-label="Routing labels"></ul></dd>
+        </dl>
+
+        <div id="proposal" class="proposal" hidden>
+          <h3 id="proposal-heading">Issue preview</h3>
+          <p class="hint">This is exactly what will be filed. Nothing is filed until you press Confirm.</p>
+          <dl class="kv">
+            <dt>Repository</dt><dd id="proposal-repo"></dd>
+            <dt>Title</dt><dd id="proposal-title"></dd>
+            <dt>Labels</dt><dd><ul id="proposal-labels" class="tags" aria-label="Issue labels"></ul></dd>
+            <dt>Expires</dt><dd id="proposal-expires"></dd>
+          </dl>
+          <p class="pre-label" id="proposal-body-label">Body</p>
+          <pre id="proposal-body" class="issue-body" tabindex="0" aria-labelledby="proposal-body-label"></pre>
+          <p id="proposal-disabled" class="note" hidden></p>
+          <div class="button-row">
+            <button type="button" id="confirm-btn" class="btn btn-primary">Confirm and file issue</button>
+            <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel proposal</button>
+          </div>
+          <p id="action-status" class="status-line" role="status" aria-live="polite"></p>
+          <p id="action-result" class="success" hidden></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Answers, reasons and previews are AI-generated from a fictional dataset. Check them before acting.</p>
+  </footer>
+</body>
+</html>
