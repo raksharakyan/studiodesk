@@ -406,3 +406,71 @@ def test_injected_http_client_is_not_closed(script: ModuleType) -> None:
     http = fake.http()
     assert script.run(script.parse_args([]), settings(), http=http) == 0
     assert not http.is_closed
+
+
+# --- conversation limit and disabled client overrides --------------------------------
+
+EXPECTED_OVERRIDES = {
+    "conversation_config_override": {
+        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "tts": {"voice_id": False},
+    }
+}
+
+
+def _agent_bodies(fake: FakeElevenLabs) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (r.method, json.loads(r.content))
+        for r in fake.requests
+        if r.url.path.startswith("/v1/convai/agents")
+    ]
+
+
+def test_create_and_update_send_duration_and_overrides(script: ModuleType) -> None:
+    fake = FakeElevenLabs()
+    assert run(script, fake, []) == 0
+    [agent_id] = fake.agents
+    assert run(script, fake, [], settings(elevenlabs_agent_id=agent_id)) == 0
+
+    bodies = _agent_bodies(fake)
+    assert [method for method, _ in bodies] == ["POST", "PATCH"]
+    for _, body in bodies:
+        assert body["conversation_config"]["conversation"] == {"max_duration_seconds": 180}
+        assert body["platform_settings"]["overrides"] == EXPECTED_OVERRIDES
+        assert body["platform_settings"]["auth"]["enable_auth"] is True
+
+
+def test_custom_duration_from_config_file(script: ModuleType, tmp_path: Path) -> None:
+    data = json.loads(AGENT_JSON.read_text(encoding="utf-8"))
+    data["conversation"] = {"max_duration_seconds": 60}
+    custom = tmp_path / "agent.json"
+    custom.write_text(json.dumps(data))
+    fake = FakeElevenLabs()
+    assert run(script, fake, ["--config", str(custom)]) == 0
+    [(_, body)] = _agent_bodies(fake)
+    assert body["conversation_config"]["conversation"] == {"max_duration_seconds": 60}
+
+
+def test_out_of_range_duration_exits_2_without_network(
+    script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = json.loads(AGENT_JSON.read_text(encoding="utf-8"))
+    data["conversation"] = {"max_duration_seconds": 7200}
+    custom = tmp_path / "agent.json"
+    custom.write_text(json.dumps(data))
+    fake = FakeElevenLabs()
+    assert run(script, fake, ["--config", str(custom)]) == 2
+    assert fake.requests == []
+    assert "conversation.max_duration_seconds" in capsys.readouterr().err
+
+
+def test_dry_run_shows_duration_and_overrides(
+    script: ModuleType,
+    clean_env: Path,
+    no_network: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert script.main(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert '"max_duration_seconds": 180' in out
+    assert '"conversation_config_override"' in out

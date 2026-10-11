@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,7 +20,7 @@ from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder
 from studiodesk.main import create_app
 from studiodesk.vectorstore import QdrantStore
-from studiodesk.voice import ElevenLabsClient
+from studiodesk.voice import ElevenLabsClient, VoiceSessionQuota
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = REPO_ROOT / "src" / "studiodesk" / "static"
@@ -569,3 +570,211 @@ def test_vendored_worklets_served_same_origin_with_headers(
             assert response.status_code == 200, url
             assert "javascript" in response.headers["content-type"], url
             assert_security_headers(response)
+
+
+# --- kill switch and daily quota (VOICE_ENABLED, VOICE_MAX_SESSIONS_PER_DAY) ---------
+
+PROD_QDRANT = "https://example.cloud.qdrant.io"
+LIMIT_DETAIL = {"detail": "Daily voice limit reached"}
+
+
+class _Clock:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+@contextmanager
+def quota_client(
+    store: QdrantStore,
+    embedder: Embedder,
+    *,
+    voice: ElevenLabsClient | None,
+    quota: VoiceSessionQuota,
+    **overrides: object,
+) -> Iterator[TestClient]:
+    values: dict[str, object] = {"app_env": "test", "elevenlabs_agent_id": AGENT_ID}
+    values.update(overrides)
+    settings = Settings(_env_file=None, **values)  # type: ignore[arg-type]
+    app = create_app(settings, embedder=embedder, store=store, voice=voice, voice_quota=quota)
+    with TestClient(app, follow_redirects=False) as client:
+        yield client
+
+
+def test_prod_default_disables_voice_without_upstream_call(
+    store: QdrantStore, fake_embedder: Embedder
+) -> None:
+    upstream = Upstream(ok_handler)
+    quota = VoiceSessionQuota(5)
+    with quota_client(
+        store,
+        fake_embedder,
+        voice=upstream.client(),
+        quota=quota,
+        app_env="prod",
+        qdrant_url=PROD_QDRANT,
+    ) as client:
+        response = client.get("/voice/session")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Voice is disabled"}
+    assert response.headers["cache-control"] == "no-store"
+    assert upstream.requests == []
+    assert quota.used_today() == 0
+
+
+def test_prod_with_voice_enabled_mints_session(store: QdrantStore, fake_embedder: Embedder) -> None:
+    upstream = Upstream(ok_handler)
+    with quota_client(
+        store,
+        fake_embedder,
+        voice=upstream.client(),
+        quota=VoiceSessionQuota(5),
+        app_env="prod",
+        qdrant_url=PROD_QDRANT,
+        voice_enabled=True,
+    ) as client:
+        assert client.get("/voice/session").status_code == 200
+    assert len(upstream.requests) == 1
+
+
+def test_disabled_wins_over_not_configured(store: QdrantStore, fake_embedder: Embedder) -> None:
+    with quota_client(
+        store, fake_embedder, voice=None, quota=VoiceSessionQuota(5), voice_enabled=False
+    ) as client:
+        response = client.get("/voice/session")
+    assert response.json() == {"detail": "Voice is disabled"}
+
+
+def test_daily_cap_returns_503_with_retry_after(
+    store: QdrantStore, fake_embedder: Embedder, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    clock = _Clock(datetime(2026, 10, 11, 23, 0, 0, tzinfo=UTC))
+    quota = VoiceSessionQuota(2, clock=clock)
+    upstream = Upstream(ok_handler)
+    with quota_client(store, fake_embedder, voice=upstream.client(), quota=quota) as client:
+        ok = [client.get("/voice/session").status_code for _ in range(2)]
+        limited = client.get("/voice/session")
+    assert ok == [200, 200]
+    assert limited.status_code == 503
+    assert limited.json() == LIMIT_DETAIL
+    assert limited.headers["retry-after"] == "3600"
+    assert limited.headers["cache-control"] == "no-store"
+    assert len(upstream.requests) == 2  # the capped call never reached ElevenLabs
+    assert any(r.getMessage() == "daily voice session limit reached" for r in caplog.records)
+    assert_no_secret_in_records(caplog.records, API_KEY, SIGNED_URL, SIGNATURE)
+
+
+def test_daily_cap_resets_at_utc_midnight(store: QdrantStore, fake_embedder: Embedder) -> None:
+    clock = _Clock(datetime(2026, 10, 11, 23, 59, 0, 500_000, tzinfo=UTC))
+    quota = VoiceSessionQuota(1, clock=clock)
+    upstream = Upstream(ok_handler)
+    with quota_client(store, fake_embedder, voice=upstream.client(), quota=quota) as client:
+        assert client.get("/voice/session").status_code == 200
+        limited = client.get("/voice/session")
+        clock.now = datetime(2026, 10, 12, 0, 0, 1, tzinfo=UTC)
+        assert client.get("/voice/session").status_code == 200
+    assert limited.headers["retry-after"] == "60"
+
+
+FAILING_UPSTREAMS = [
+    pytest.param(_respond(httpx.Response(500, text="boom")), id="5xx"),
+    pytest.param(_respond(httpx.Response(503, text="down")), id="503"),
+    pytest.param(
+        _respond(httpx.Response(200, json={"signed_url": "wss://evil.example/v1/convai/x"})),
+        id="bad-signed-url",
+    ),
+    pytest.param(_raise(httpx.ReadTimeout("t")), id="timeout"),
+    pytest.param(_raise(httpx.ConnectError("c")), id="connect-error"),
+]
+
+
+@pytest.mark.parametrize("failing", FAILING_UPSTREAMS)
+def test_upstream_failure_releases_the_slot(
+    store: QdrantStore, fake_embedder: Embedder, failing: Handler
+) -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return failing(request) if calls["n"] == 1 else ok_handler(request)
+
+    quota = VoiceSessionQuota(1)
+    upstream = Upstream(handler)
+    with quota_client(store, fake_embedder, voice=upstream.client(), quota=quota) as client:
+        first = client.get("/voice/session")
+        assert quota.used_today() == 0
+        second = client.get("/voice/session")
+    assert first.status_code == 502
+    assert second.status_code == 200  # the cap of 1 was not used up by the failure
+    assert quota.used_today() == 1
+
+
+def test_success_keeps_the_slot(store: QdrantStore, fake_embedder: Embedder) -> None:
+    quota = VoiceSessionQuota(3)
+    with quota_client(store, fake_embedder, voice=Upstream(ok_handler).client(), quota=quota) as c:
+        assert c.get("/voice/session").status_code == 200
+    assert quota.used_today() == 1
+
+
+@pytest.mark.parametrize(
+    ("with_client", "overrides"),
+    [
+        pytest.param(False, {}, id="no-key"),
+        pytest.param(True, {"elevenlabs_agent_id": None}, id="no-agent-id"),
+    ],
+)
+def test_not_configured_consumes_no_slot(
+    store: QdrantStore,
+    fake_embedder: Embedder,
+    with_client: bool,
+    overrides: dict[str, object],
+) -> None:
+    quota = VoiceSessionQuota(1)
+    voice = Upstream(ok_handler).client() if with_client else None
+    with quota_client(store, fake_embedder, voice=voice, quota=quota, **overrides) as client:
+        for _ in range(3):
+            response = client.get("/voice/session")
+            assert response.status_code == 503
+            assert response.json() == NOT_CONFIGURED
+    assert quota.used_today() == 0
+
+
+def test_app_builds_quota_from_settings(store: QdrantStore, fake_embedder: Embedder) -> None:
+    upstream = Upstream(ok_handler)
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        elevenlabs_agent_id=AGENT_ID,
+        voice_max_sessions_per_day=1,
+    )
+    app = create_app(settings, embedder=fake_embedder, store=store, voice=upstream.client())
+    with TestClient(app) as client:
+        assert client.get("/voice/session").status_code == 200
+        assert client.get("/voice/session").json() == LIMIT_DETAIL
+    assert len(upstream.requests) == 1
+
+
+class _ExplodingVoice(ElevenLabsClient):
+    """Raises an unexpected (non-ElevenLabs) error after the slot was reserved."""
+
+    def __init__(self) -> None:
+        pass
+
+    def get_signed_url(self, agent_id: str) -> str:
+        raise RuntimeError(f"bug while handling {SIGNATURE}")
+
+
+def test_unexpected_error_releases_the_slot(store: QdrantStore, fake_embedder: Embedder) -> None:
+    quota = VoiceSessionQuota(1)
+    settings = Settings(_env_file=None, app_env="test", elevenlabs_agent_id=AGENT_ID)
+    app = create_app(
+        settings, embedder=fake_embedder, store=store, voice=_ExplodingVoice(), voice_quota=quota
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/voice/session")
+    assert response.status_code == 500
+    assert SIGNATURE not in response.text
+    assert quota.used_today() == 0

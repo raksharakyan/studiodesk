@@ -287,3 +287,62 @@ def test_validate_allow_hosts_caps_count() -> None:
     with pytest.raises(ValueError):
         validate_allow_hosts(hosts)
     assert len(validate_allow_hosts(hosts[:MAX_ALLOW_HOSTS])) == MAX_ALLOW_HOSTS
+
+
+# --- conversation limits and client overrides ----------------------------------------
+
+EXPECTED_OVERRIDES = {
+    "conversation_config_override": {
+        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "tts": {"voice_id": False},
+    }
+}
+
+
+def test_agent_json_caps_conversation_at_180s(config: VoiceAgentConfig) -> None:
+    assert config.conversation.max_duration_seconds == 180
+
+
+def test_conversation_defaults_to_180_when_omitted() -> None:
+    assert VoiceAgentConfig.model_validate(_config()).conversation.max_duration_seconds == 180
+
+
+@pytest.mark.parametrize("value", [10, 3600])
+def test_conversation_bounds_accepted(value: int) -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(conversation={"max_duration_seconds": value}))
+    assert cfg.conversation.max_duration_seconds == value
+
+
+@pytest.mark.parametrize(
+    "conversation",
+    [
+        {"max_duration_seconds": 9},
+        {"max_duration_seconds": 0},
+        {"max_duration_seconds": -1},
+        {"max_duration_seconds": 3601},
+        {"max_duration_seconds": "forever"},
+        {"max_duration_seconds": 180, "turn_timeout": 5},
+        {"unknown": 1},
+    ],
+)
+def test_conversation_invalid_rejected(conversation: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(_config(conversation=conversation))
+
+
+def test_agent_payload_sends_duration_and_disabled_overrides(config: VoiceAgentConfig) -> None:
+    for hosts in ([], ["localhost"]):
+        payload = agent_payload(config, llm="l", tool_ids=["t"], allow_hosts=hosts)
+        assert payload["conversation_config"]["conversation"] == {"max_duration_seconds": 180}
+        assert payload["platform_settings"]["overrides"] == EXPECTED_OVERRIDES
+        assert payload["platform_settings"]["auth"]["enable_auth"] is True
+
+
+def test_overrides_are_all_false() -> None:
+    def leaves(node: object) -> list[object]:
+        if isinstance(node, dict):
+            return [leaf for value in node.values() for leaf in leaves(value)]
+        return [node]
+
+    values = leaves(EXPECTED_OVERRIDES)
+    assert values and all(value is False for value in values)
