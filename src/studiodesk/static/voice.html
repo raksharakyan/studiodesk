@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
   <title>StudioDesk Voice</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/styles.css">
   <!-- ElevenLabs browser SDK, pinned to an exact version with Subresource Integrity.
        The self-contained IIFE bundle is used (not /+esm) so the whole SDK is covered by one hash.
@@ -159,7 +160,7 @@
             <button type="button" id="confirm-btn" class="btn btn-primary">Confirm and file issue</button>
             <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel proposal</button>
           </div>
-          <p id="action-status" class="status-line" role="status" aria-live="polite"></p>
+          <p id="action-status" class="status-line" role="status" aria-live="polite" tabindex="-1"></p>
           <p id="action-result" class="success" hidden></p>
         </div>
       </div>
