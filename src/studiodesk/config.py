@@ -10,6 +10,9 @@ from studiodesk import __version__
 
 GITHUB_REPO_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
+# ElevenLabs agent ids (e.g. `agent_01abc...`): kept URL-safe because they go in a query.
+ELEVENLABS_AGENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
+VOICE_LLM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 DEFAULT_LLM_MODELS = {
@@ -130,9 +133,14 @@ class Settings(BaseSettings):
     slack_webhook_url: SecretStr | None = None
     slack_timeout_s: float = Field(default=10.0, gt=0, le=120)
 
-    # ElevenLabs voice agent
+    # ElevenLabs voice agent. Voice is enabled only when both key and agent id are set.
     elevenlabs_api_key: SecretStr | None = None
-    elevenlabs_agent_id: str | None = Field(default=None, max_length=128)
+    elevenlabs_agent_id: str | None = Field(default=None, pattern=ELEVENLABS_AGENT_ID_PATTERN)
+    elevenlabs_timeout_s: float = Field(default=10.0, gt=0, le=120)
+    # Per-client-IP limit for GET /voice/session (each call mints a signed session URL).
+    voice_rate_limit: str = Field(default="10/minute", pattern=RATE_LIMIT_PATTERN)
+    # LLM the ElevenLabs-hosted agent runs on; used only by scripts/setup_voice_agent.py.
+    voice_llm: str = Field(default="gemini-2.0-flash", pattern=VOICE_LLM_PATTERN)
 
     @property
     def resolved_llm_model(self) -> str:
@@ -185,6 +193,8 @@ class Settings(BaseSettings):
         "github_token",
         "slack_webhook_url",
         "llm_model",
+        "elevenlabs_api_key",
+        "elevenlabs_agent_id",
         mode="before",
     )
     @classmethod
