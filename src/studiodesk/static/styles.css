@@ -478,6 +478,23 @@ textarea {
   border-top: 1px solid var(--border);
 }
 
+/* A preview that replaced a pending one is outlined until it is confirmed or cancelled.
+   The border colour is the note text colour (>= 3:1 on the surface in both themes). */
+.proposal.is-changed {
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 3px solid var(--note-text);
+  border-radius: var(--radius);
+}
+
+.note-changed {
+  font-weight: 600;
+  border-left: 4px solid var(--note-text);
+}
+
+#voice-fallback {
+  margin-top: 0.5rem;
+}
+
 .pre-label {
   font-weight: 600;
   margin-bottom: 0.25rem;

@@ -13,9 +13,9 @@ const DESCRIPTION_MAX_CHARS = 4000;
 const PLATFORMS = ["pc", "ps5", "xbox_series", "switch"];
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const TRANSCRIPT_MAX_ITEMS = 200;
-// A freshly shown proposal cannot be confirmed for this long, so a preview swapped in by the
-// voice agent right before a click is never confirmed by accident.
-const CONFIRM_ARM_DELAY_MS = 1200;
+// A freshly shown proposal cannot be confirmed for this long, so a preview that appears or
+// changes right before a click is never confirmed by accident.
+const CONFIRM_ARM_DELAY_MS = 3000;
 
 // Audio worklets vendored from the same pinned SDK version as the script in voice.html and
 // served from this origin (see static/vendor/elevenlabs-client-<version>/README.txt for the
@@ -33,6 +33,7 @@ const WORKLET_PATHS = Object.freeze({
 export const CLIENT_TOOL_NAMES = Object.freeze(["ask_studiodesk", "check_bug_report"]);
 
 const PROPOSAL_NOTE = "The user must press Confirm on screen to file the issue.";
+const PENDING_PROPOSAL_NOTE = "A previous preview is still pending; the user must confirm or cancel it first.";
 
 const DOC_TYPE_LABELS = {
   bug_report: "Bug report",
@@ -57,12 +58,29 @@ const SLACK_LABELS = {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-class ApiError extends Error {
-  constructor(status, retryAfter) {
+// Error `detail` strings the page recognises, mapped to fixed codes. Any other detail text is
+// dropped: the page never shows or speaks server-provided text, it only compares it here.
+const KNOWN_DETAILS = Object.freeze({
+  "Voice is not configured": "voice_not_configured",
+  "Voice is disabled": "voice_disabled",
+  "Daily voice limit reached": "voice_daily_limit",
+});
+
+/** Failed API call. `code` is null or one of the KNOWN_DETAILS codes (never raw server text). */
+export class ApiError extends Error {
+  constructor(status, retryAfter = null, code = null) {
     super(`HTTP ${status}`);
+    this.name = "ApiError";
     this.status = status;
     this.retryAfter = retryAfter;
+    this.code = Object.values(KNOWN_DETAILS).includes(code) ? code : null;
   }
+}
+
+/** Map an error response body to a known code, or null. Never returns the body text itself. */
+export function detailCode(body) {
+  const detail = body && typeof body === "object" ? body.detail : null;
+  return typeof detail === "string" && Object.hasOwn(KNOWN_DETAILS, detail) ? KNOWN_DETAILS[detail] : null;
 }
 
 async function api(method, path, body) {
@@ -85,7 +103,13 @@ async function api(method, path, body) {
   }
   if (!response.ok) {
     const retry = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
-    throw new ApiError(response.status, Number.isFinite(retry) && retry > 0 ? retry : null);
+    let code = null;
+    try {
+      code = detailCode(await response.json());
+    } catch {
+      /* non-JSON error body: status code only */
+    }
+    throw new ApiError(response.status, Number.isFinite(retry) && retry > 0 ? retry : null, code);
   }
   try {
     return await response.json();
@@ -100,13 +124,24 @@ async function api(method, path, body) {
  * @param {"session"|"ask"|"bugs"|"confirm"|"cancel"} context
  */
 export function friendlyError(err, context) {
-  const status = err instanceof ApiError ? err.status : -1;
-  const wait = err instanceof ApiError && err.retryAfter ? ` in about ${err.retryAfter} seconds` : " in a moment";
+  const isApi = err instanceof ApiError;
+  const status = isApi ? err.status : -1;
+  const code = isApi ? err.code : null;
+  const wait = isApi && err.retryAfter ? ` in ${formatWait(err.retryAfter)}` : " in a moment";
   if (status === 0) return "I couldn't reach the StudioDesk server. Please check the connection and try again.";
   if (status === 429) return `Too many requests right now. Please try again${wait}.`;
   if (context === "session") {
-    if (status === 503) return "Voice is not configured on this server. You can still type a question below.";
-    return "Voice could not be started. Please try again later.";
+    const typed = " You can still type a question or check a bug below.";
+    if (code === "voice_disabled") return `Voice is turned off on this server right now.${typed}`;
+    if (code === "voice_daily_limit") {
+      const later = isApi && err.retryAfter ? wait : " later";
+      return `Today's voice limit has been reached. Please try voice again${later}.${typed}`;
+    }
+    if (status === 503 && isApi && err.retryAfter && code === null) {
+      return `Voice is temporarily unavailable. Please try again${wait}.${typed}`;
+    }
+    if (status === 503) return `Voice is not configured on this server.${typed}`;
+    return `Voice could not be started. Please try again later.${typed}`;
   }
   if (context === "confirm" || context === "cancel") {
     if (status === 404) return "That issue proposal was not found. Please check the bug again.";
@@ -124,6 +159,21 @@ export function friendlyError(err, context) {
   if (status === 503) return `The assistant is temporarily unavailable. Please try again${wait}.`;
   if (status === 502) return "The assistant could not complete this request. Please try rephrasing.";
   return "Something went wrong. Please try again.";
+}
+
+/** Speakable wait: "about 30 seconds", "about 5 minutes", "about 3 hours". */
+export function formatWait(seconds) {
+  const s = Math.max(1, Math.round(Number(seconds) || 0));
+  if (s < 90) return `about ${s} second${s === 1 ? "" : "s"}`;
+  const minutes = Math.round(s / 60);
+  if (minutes < 60) return `about ${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  return `about ${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
+/** Only the error class name is ever logged (a full error could carry the signed URL). */
+function errName(err) {
+  return typeof err?.name === "string" ? err.name.slice(0, 40) : "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +243,11 @@ export function toAgentBugResult(data) {
     proposal_ready: ready,
     note,
   });
+}
+
+/** Tool result when a previous proposal is still pending (nothing was checked or replaced). */
+export function toAgentPendingResult() {
+  return JSON.stringify({ proposal_ready: false, note: PENDING_PROPOSAL_NOTE });
 }
 
 /** Only https links to github.com are shown. Returns the normalised href or null. */
@@ -351,9 +406,27 @@ async function runAsk(question) {
 // Bug check: rendering, proposal and confirm/cancel
 // ---------------------------------------------------------------------------
 
-// The only place the confirm token is kept. Replaced when a new proposal is rendered.
+// The only place the confirm token is kept. Replaced only when the user checks another bug
+// with the form; the voice agent can never replace a pending proposal (see check_bug_report).
 let currentProposal = null; // { actionId, token, armed, busy, done }
 let bugSeq = 0;
+
+const AGENT_BLOCKED_STATUS =
+  "The voice agent asked to check another bug. Confirm or cancel the issue preview below first.";
+const PREVIEW_CHANGED_TEXT = "The issue preview changed. Review it again before confirming.";
+
+/** True while a confirmable proposal is on screen and not yet confirmed or cancelled. */
+function hasPendingProposal() {
+  return Boolean(currentProposal && !currentProposal.done);
+}
+
+function setPreviewChanged(changed) {
+  $("proposal").classList.toggle("is-changed", changed);
+  const notice = $("proposal-changed");
+  notice.hidden = !changed;
+  // Text is set after unhiding so the role="alert" region announces it.
+  notice.textContent = changed ? PREVIEW_CHANGED_TEXT : "";
+}
 
 function setActionButtons({ confirm, cancel }) {
   $("confirm-btn").disabled = !confirm;
@@ -381,8 +454,9 @@ function renderCandidates(candidates) {
   }
 }
 
-function renderProposal(proposal) {
+function renderProposal(proposal, { changed = false } = {}) {
   currentProposal = null;
+  setPreviewChanged(false);
   setStatus("action-status", "");
   show("action-result", false);
   $("action-result").replaceChildren();
@@ -411,6 +485,7 @@ function renderProposal(proposal) {
   }
 
   show("proposal-disabled", false);
+  if (changed) setPreviewChanged(true);
   const state = { actionId: proposal.action_id, token: proposal.confirm_token, armed: false, busy: false, done: false };
   currentProposal = state;
   setActionButtons({ confirm: false, cancel: true });
@@ -422,7 +497,7 @@ function renderProposal(proposal) {
   }, CONFIRM_ARM_DELAY_MS);
 }
 
-function renderBugResult(data) {
+function renderBugResult(data, { changed = false } = {}) {
   show("bug-result", true);
   setText("bug-verdict", VERDICT_LABELS[data.verdict] ?? asText(data.verdict));
 
@@ -442,17 +517,28 @@ function renderBugResult(data) {
   setText("routing-component", data.routing?.component ?? "unknown");
   setText("routing-severity", data.routing?.severity ?? "unknown");
   fillTags("routing-labels", data.routing?.labels);
-  renderProposal(data.proposed_action);
+  renderProposal(data.proposed_action, { changed });
 }
 
-/** POST /bugs/check and render. Returns {ok, data} or {ok:false, message}. */
-async function runBugCheck(body) {
+/**
+ * POST /bugs/check and render. Returns {ok, data}, {ok:false, message}, or {ok:false, blocked:true}
+ * when an agent-started check finished while a pending proposal is on screen (it is kept).
+ * @param {"agent"|"form"} origin
+ */
+async function runBugCheck(body, origin) {
   const seq = ++bugSeq;
   setStatus("bug-status", "Checking for duplicates…");
   try {
     const data = await api("POST", "/bugs/check", body);
+    if (origin === "agent" && hasPendingProposal()) {
+      // A preview appeared while this check ran. Never swap it under the user: keep it.
+      if (seq === bugSeq) setStatus("bug-status", AGENT_BLOCKED_STATUS);
+      return { ok: false, blocked: true };
+    }
     if (seq === bugSeq) {
-      renderBugResult(data);
+      // Only the user's own form submit can replace a pending preview; flag the change.
+      const changed = hasPendingProposal() && isProposalReady(data.proposed_action);
+      renderBugResult(data, { changed });
       const suffix = isProposalReady(data.proposed_action) ? " Review the issue preview and press Confirm to file it." : "";
       setStatus("bug-status", `Bug check complete: ${VERDICT_LABELS[data.verdict] ?? asText(data.verdict)}.${suffix}`);
     }
@@ -487,6 +573,7 @@ async function onConfirmClick(event) {
     state.done = true;
     state.token = null;
     if (currentProposal === state) currentProposal = null;
+    setPreviewChanged(false);
     const result = $("action-result");
     result.replaceChildren();
     const number = Number.isInteger(data.issue_number) ? data.issue_number : null;
@@ -516,6 +603,7 @@ async function onConfirmClick(event) {
       state.done = true;
       state.token = null;
       if (currentProposal === state) currentProposal = null;
+      setPreviewChanged(false);
       $("action-status").focus();
     } else if (currentProposal === state) {
       setActionButtons({ confirm: true, cancel: true });
@@ -534,6 +622,7 @@ async function onCancelClick(event) {
     state.done = true;
     state.token = null;
     if (currentProposal === state) currentProposal = null;
+    setPreviewChanged(false);
     setStatus("action-status", "Cancelled. Nothing was filed.");
     $("action-status").focus();
     tellAgent("The user pressed Cancel. No issue was filed.");
@@ -545,6 +634,7 @@ async function onCancelClick(event) {
       state.done = true;
       state.token = null;
       if (currentProposal === state) currentProposal = null;
+      setPreviewChanged(false);
       $("action-status").focus();
     } else if (currentProposal === state) {
       setActionButtons({ confirm: state.armed, cancel: true });
@@ -566,12 +656,18 @@ const clientTools = {
   },
 
   async check_bug_report(params) {
+    // A pending preview is never replaced by the agent: the user must confirm or cancel it first.
+    if (hasPendingProposal()) {
+      setStatus("bug-status", AGENT_BLOCKED_STATUS);
+      return toAgentPendingResult();
+    }
     const built = buildBugCheckBody(params);
     if (built.error) {
       setStatus("bug-status", built.error.form, true);
       return `Error: ${built.error.agent}`;
     }
-    const result = await runBugCheck(built.body);
+    const result = await runBugCheck(built.body, "agent");
+    if (result.blocked) return toAgentPendingResult();
     return result.ok ? toAgentBugResult(result.data) : `Error: ${result.message}`;
   },
 };
@@ -588,6 +684,14 @@ function setVoiceError(message) {
   const node = $("voice-error");
   node.textContent = asText(message);
   node.hidden = !message;
+  // Whenever voice fails, offer a direct way to the typed form.
+  show("voice-fallback", Boolean(message));
+}
+
+function onVoiceFallback() {
+  const input = $("ask-question");
+  input.scrollIntoView({ block: "center" });
+  input.focus();
 }
 
 function setVoiceStatus(status) {
@@ -705,7 +809,8 @@ async function startVoice() {
         if (details?.reason === "error") setVoiceError("The voice connection was lost. Press the button to start again.");
       },
       onError: (message) => {
-        console.warn("Voice error:", message);
+        // The SDK message text is not logged; it may echo connection details.
+        console.warn("StudioDesk voice: SDK reported an error");
         setVoiceError("Voice ran into a problem. If it stops responding, stop and start voice again.");
       },
       onStatusChange: ({ status }) => setVoiceStatus(status),
@@ -715,7 +820,7 @@ async function startVoice() {
     conversation = started;
     if (stopRequested) await stopVoice();
   } catch (err) {
-    console.warn("Voice start failed:", err);
+    console.warn("StudioDesk voice: start failed", errName(err));
     conversation = null;
     setVoiceError("Voice could not be started. Please try again later.");
     setVoiceStatus("disconnected");
@@ -735,7 +840,7 @@ async function stopVoice() {
   try {
     await active.endSession();
   } catch (err) {
-    console.warn("Voice stop failed:", err);
+    console.warn("StudioDesk voice: stop failed", errName(err));
   }
   setVoiceStatus("disconnected");
 }
@@ -787,11 +892,12 @@ function onBugSubmit(event) {
     $(built.field).focus();
     return;
   }
-  void runBugCheck(built.body);
+  void runBugCheck(built.body, "form");
 }
 
 function init() {
   $("voice-toggle").addEventListener("click", onVoiceToggle);
+  $("voice-fallback").addEventListener("click", onVoiceFallback);
   $("ask-form").addEventListener("submit", onAskSubmit);
   $("bug-form").addEventListener("submit", onBugSubmit);
   $("confirm-btn").addEventListener("click", onConfirmClick);

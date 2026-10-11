@@ -52,6 +52,7 @@
         </div>
       </div>
       <p id="voice-error" class="error" role="alert" hidden></p>
+      <button type="button" id="voice-fallback" class="btn btn-secondary" hidden>Type a question instead</button>
     </section>
 
     <section class="panel" aria-labelledby="transcript-heading">
@@ -146,6 +147,7 @@
 
         <div id="proposal" class="proposal" hidden>
           <h3 id="proposal-heading">Issue preview</h3>
+          <p id="proposal-changed" class="note note-changed" role="alert" hidden></p>
           <p class="hint">This is exactly what will be filed. Nothing is filed until you press Confirm.</p>
           <dl class="kv">
             <dt>Repository</dt><dd id="proposal-repo"></dd>
