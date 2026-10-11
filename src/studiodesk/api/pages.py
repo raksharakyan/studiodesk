@@ -1,9 +1,10 @@
 """HTML pages and static assets, served with strict security headers.
 
 `GET /voice` serves `static/voice.html`; `/static` serves the rest of `static/`. Both carry
-a Content-Security-Policy that allows scripts only from this origin and the pinned CDN
-host, network connections only to this origin and ElevenLabs, and the microphone only for
-this origin. The files themselves are owned by the frontend (see `static/`).
+a Content-Security-Policy that allows scripts only from this origin and the one pinned SDK
+file on the CDN (`ELEVENLABS_SDK_URL`), network connections only to this origin and
+ElevenLabs, and the microphone only for this origin. The files themselves are owned by
+the frontend (see `static/`).
 """
 
 from pathlib import Path
@@ -17,12 +18,19 @@ from starlette.types import Scope
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 VOICE_PAGE = "voice.html"
 CDN_SCRIPT_HOST = "https://cdn.jsdelivr.net"
+# The only version of the ElevenLabs browser SDK the voice page may load. The CSP allows
+# exactly this file (not the whole CDN host); `static/voice.html` must reference the same
+# URL (with its SRI hash) and the vendored worklets must come from the same version.
+ELEVENLABS_SDK_VERSION = "1.27.0"
+ELEVENLABS_SDK_URL = (
+    f"{CDN_SCRIPT_HOST}/npm/@elevenlabs/client@{ELEVENLABS_SDK_VERSION}/dist/lib.iife.js"
+)
 ELEVENLABS_CONNECT_HOSTS = ("wss://api.elevenlabs.io", "https://api.elevenlabs.io")
 
 CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'none'",
-        f"script-src 'self' {CDN_SCRIPT_HOST}",
+        f"script-src 'self' {ELEVENLABS_SDK_URL}",
         f"connect-src 'self' {' '.join(ELEVENLABS_CONNECT_HOSTS)}",
         "style-src 'self'",
         "img-src 'self' data:",

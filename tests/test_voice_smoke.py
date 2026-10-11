@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from studiodesk.api.pages import ELEVENLABS_SDK_URL
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder
 from studiodesk.main import create_app
@@ -107,7 +108,7 @@ def test_voice_page_has_security_headers(
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
         csp = response.headers["Content-Security-Policy"]
-        assert "script-src 'self' https://cdn.jsdelivr.net;" in csp
+        assert f"script-src 'self' {ELEVENLABS_SDK_URL};" in csp
         assert "connect-src 'self' wss://api.elevenlabs.io https://api.elevenlabs.io;" in csp
         assert response.headers["Permissions-Policy"].startswith("microphone=(self)")
         assert response.headers["X-Content-Type-Options"] == "nosniff"

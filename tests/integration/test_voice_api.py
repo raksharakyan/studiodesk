@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from studiodesk.api.pages import ELEVENLABS_SDK_URL
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder
 from studiodesk.main import create_app
@@ -33,10 +34,11 @@ SIGNED_URL = (
 UPSTREAM_DETAIL = {"detail": "Voice is temporarily unavailable"}
 NOT_CONFIGURED = {"detail": "Voice is not configured"}
 
-# Exact headers the voice page must carry (hard-coded here so drift in pages.py is caught).
+# Exact headers the voice page must carry (hard-coded here so drift in pages.py is caught;
+# only the pinned SDK URL is shared with pages.py, so the version lives in one place).
 EXPECTED_CSP = (
     "default-src 'none'; "
-    "script-src 'self' https://cdn.jsdelivr.net; "
+    f"script-src 'self' {ELEVENLABS_SDK_URL}; "
     "connect-src 'self' wss://api.elevenlabs.io https://api.elevenlabs.io; "
     "style-src 'self'; "
     "img-src 'self' data:; "
@@ -489,6 +491,7 @@ def test_external_scripts_have_sri_and_crossorigin(voice_html: _HTMLScan) -> Non
         assert parts.scheme == "https", src
         assert f"{parts.scheme}://{parts.netloc}" == "https://cdn.jsdelivr.net", src
         assert re.search(r"@\d+\.\d+\.\d+/", parts.path), f"version not pinned: {src}"
+        assert src == ELEVENLABS_SDK_URL, "the CSP script-src allows only ELEVENLABS_SDK_URL"
         assert re.fullmatch(r"sha(384|512)-[A-Za-z0-9+/]{40,}={0,2}", script.get("integrity") or "")
         assert script.get("crossorigin") == "anonymous"
 
