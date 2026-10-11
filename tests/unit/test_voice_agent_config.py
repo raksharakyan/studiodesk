@@ -232,7 +232,15 @@ def test_tool_payload_is_the_file_entry(config: VoiceAgentConfig, raw: dict[str,
 
 def test_agent_payload_enables_auth_and_wires_tools(config: VoiceAgentConfig) -> None:
     payload = agent_payload(config, llm="llm-x", tool_ids=["t1", "t2"], allow_hosts=[])
-    assert payload["platform_settings"] == {"auth": {"enable_auth": True}}
+    assert payload["platform_settings"] == {
+        "auth": {"enable_auth": True},
+        "overrides": {
+            "conversation_config_override": {
+                "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+                "tts": {"voice_id": False},
+            }
+        },
+    }
     agent = payload["conversation_config"]["agent"]
     assert agent["prompt"] == {"prompt": config.prompt, "llm": "llm-x", "tool_ids": ["t1", "t2"]}
     assert agent["first_message"] == config.first_message

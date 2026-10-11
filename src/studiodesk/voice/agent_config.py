@@ -103,6 +103,22 @@ def validate_allow_hosts(hosts: list[str]) -> list[str]:
     return cleaned
 
 
+def disabled_client_overrides() -> dict[str, Any]:
+    """`platform_settings.overrides.conversation_config_override` with every override off.
+
+    The browser must not be able to replace the system prompt, first message, language or
+    voice when it starts a session, so each is sent as `false` explicitly (not left to the
+    ElevenLabs default); the setup script re-asserts this on every run.
+    Verify field shape live: this follows the ElevenLabs Agents API docs as of M5 and has
+    not been checked against the live API.
+    """
+    # verify field shape live (ElevenLabs may ignore unknown keys silently).
+    return {
+        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "tts": {"voice_id": False},
+    }
+
+
 def tool_payload(tool: VoiceToolConfig) -> dict[str, Any]:
     """The `tool_config` object for creating or updating `tool`."""
     return tool.model_dump(mode="json")
@@ -115,6 +131,7 @@ def agent_payload(
 
     Auth is always enabled (sessions need a server-minted signed URL). The allowlist is
     sent only when hosts are given, so an update without `--allow-host` leaves it as is.
+    Every client-side override is disabled on each run (see `DISABLED_CLIENT_OVERRIDES`).
     """
     auth: dict[str, Any] = {"enable_auth": True}
     if allow_hosts:
@@ -131,5 +148,8 @@ def agent_payload(
                 "max_duration_seconds": config.conversation.max_duration_seconds,
             },
         },
-        "platform_settings": {"auth": auth},
+        "platform_settings": {
+            "auth": auth,
+            "overrides": {"conversation_config_override": disabled_client_overrides()},
+        },
     }
