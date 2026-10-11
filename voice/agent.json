@@ -63,5 +63,8 @@
         ]
       }
     }
-  ]
+  ],
+  "conversation": {
+    "max_duration_seconds": 180
+  }
 }

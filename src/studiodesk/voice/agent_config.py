@@ -1,8 +1,9 @@
 """The voice agent's config-as-code (`voice/agent.json`) and the API payloads built from it.
 
-The file holds the agent's name, first message, language, system prompt and client tool
-definitions. The agent's LLM comes from `Settings.voice_llm`; tool ids come from the
-workspace at setup time. Payload shapes follow the ElevenLabs Agents API
+The file holds the agent's name, first message, language, system prompt, client tool
+definitions and conversation limits (`conversation.max_duration_seconds`, default 180).
+The agent's LLM comes from `Settings.voice_llm`; tool ids come from the workspace at setup
+time. Payload shapes follow the ElevenLabs Agents API
 (`POST /v1/convai/tools`, `POST /v1/convai/agents/create`).
 """
 
@@ -20,6 +21,8 @@ ALLOW_HOST_PATTERN = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*(?::\d{1,5})?$"
 )
 MAX_ALLOW_HOSTS = 10
+# Hard cap on one conversation's length; bounds the ElevenLabs cost of a single session.
+DEFAULT_MAX_DURATION_S = 180
 
 
 class VoiceToolConfig(BaseModel):
@@ -47,6 +50,14 @@ class VoiceToolConfig(BaseModel):
         return value
 
 
+class VoiceConversationConfig(BaseModel):
+    """Conversation limits (`conversation_config.conversation` in the agent payload)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_duration_seconds: int = Field(default=DEFAULT_MAX_DURATION_S, ge=10, le=3600)
+
+
 class VoiceAgentConfig(BaseModel):
     """The whole `voice/agent.json` file."""
 
@@ -57,6 +68,7 @@ class VoiceAgentConfig(BaseModel):
     language: str = Field(pattern=r"^[a-z]{2}$")
     prompt: str = Field(min_length=1, max_length=20_000)
     tools: list[VoiceToolConfig] = Field(min_length=1, max_length=10)
+    conversation: VoiceConversationConfig = Field(default_factory=VoiceConversationConfig)
 
     @field_validator("tools")
     @classmethod
@@ -114,7 +126,10 @@ def agent_payload(
                 "first_message": config.first_message,
                 "language": config.language,
                 "prompt": {"prompt": config.prompt, "llm": llm, "tool_ids": tool_ids},
-            }
+            },
+            "conversation": {
+                "max_duration_seconds": config.conversation.max_duration_seconds,
+            },
         },
         "platform_settings": {"auth": auth},
     }
