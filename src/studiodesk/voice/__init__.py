@@ -7,11 +7,14 @@ from studiodesk.voice.client import (
     ElevenLabsError,
     build_http_client,
 )
+from studiodesk.voice.quota import VoiceDailyLimitError, VoiceSessionQuota
 
 __all__ = [
     "ELEVENLABS_API_BASE",
     "SIGNED_URL_TTL_S",
     "ElevenLabsClient",
     "ElevenLabsError",
+    "VoiceDailyLimitError",
+    "VoiceSessionQuota",
     "build_http_client",
 ]

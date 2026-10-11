@@ -18,7 +18,7 @@ from studiodesk.embeddings import Embedder
 from studiodesk.llm import LLMClient
 from studiodesk.llm.limits import GatedLLM, LLMConcurrencyGate
 from studiodesk.vectorstore import QdrantStore
-from studiodesk.voice import ElevenLabsClient
+from studiodesk.voice import ElevenLabsClient, VoiceSessionQuota
 
 SERVICE_UNAVAILABLE_DETAIL = "Search is temporarily unavailable"
 LLM_UNAVAILABLE_DETAIL = "The assistant is temporarily unavailable"
@@ -26,6 +26,8 @@ LLM_NOT_CONFIGURED_DETAIL = "LLM not configured"
 ACTIONS_UNAVAILABLE_DETAIL = "Actions are temporarily unavailable"
 ISSUES_UNAVAILABLE_DETAIL = "Issue filing is temporarily unavailable"
 VOICE_NOT_CONFIGURED_DETAIL = "Voice is not configured"
+VOICE_DISABLED_DETAIL = "Voice is disabled"
+VOICE_UNAVAILABLE_DETAIL = "Voice is temporarily unavailable"
 
 
 @lru_cache(maxsize=1)
@@ -102,6 +104,22 @@ def get_slack(request: Request) -> SlackNotifier:
     if slack is None:
         raise HTTPException(status_code=503, detail=ACTIONS_UNAVAILABLE_DETAIL)
     return slack
+
+
+def require_voice_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> None:
+    """Raise 503 "Voice is disabled" when the VOICE_ENABLED kill switch is off."""
+    if not settings.voice_enabled:
+        raise HTTPException(
+            status_code=503, detail=VOICE_DISABLED_DETAIL, headers={"Cache-Control": "no-store"}
+        )
+
+
+def get_voice_quota(request: Request) -> VoiceSessionQuota:
+    """Return the daily voice session counter created at startup, or 503 if missing."""
+    quota: VoiceSessionQuota | None = getattr(request.app.state, "voice_quota", None)
+    if quota is None:
+        raise HTTPException(status_code=503, detail=VOICE_UNAVAILABLE_DETAIL)
+    return quota
 
 
 def get_voice(request: Request) -> ElevenLabsClient:

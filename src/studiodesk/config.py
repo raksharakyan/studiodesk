@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     elevenlabs_timeout_s: float = Field(default=10.0, gt=0, le=120)
     # Per-client-IP limit for GET /voice/session (each call mints a signed session URL).
     voice_rate_limit: str = Field(default="10/minute", pattern=RATE_LIMIT_PATTERN)
+    # Kill switch for GET /voice/session. Default: on in dev/test, OFF in prod unless set
+    # explicitly (see _voice_off_in_prod_by_default): each session costs ElevenLabs credits.
+    voice_enabled: bool = True
+    # Maximum voice sessions minted per UTC day (per process); beyond it 503 + Retry-After.
+    voice_max_sessions_per_day: int = Field(default=30, ge=1, le=100_000)
     # LLM the ElevenLabs-hosted agent runs on; used only by scripts/setup_voice_agent.py.
     voice_llm: str = Field(default="gemini-2.0-flash", pattern=VOICE_LLM_PATTERN)
 
@@ -178,6 +183,13 @@ class Settings(BaseSettings):
         """Disable outward actions in prod unless ACTIONS_ENABLED was set explicitly."""
         if self.app_env == "prod" and "actions_enabled" not in self.model_fields_set:
             object.__setattr__(self, "actions_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _voice_off_in_prod_by_default(self) -> "Settings":
+        """Disable voice sessions in prod unless VOICE_ENABLED was set explicitly."""
+        if self.app_env == "prod" and "voice_enabled" not in self.model_fields_set:
+            object.__setattr__(self, "voice_enabled", False)
         return self
 
     @model_validator(mode="after")
