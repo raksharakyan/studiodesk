@@ -12,6 +12,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
@@ -21,7 +22,8 @@ from starlette.concurrency import run_in_threadpool
 from studiodesk.actions.github import GitHubIssues
 from studiodesk.actions.proposals import InMemoryProposalStore, ProposalStore
 from studiodesk.actions.slack import SlackNotifier
-from studiodesk.api import actions, ask, bugs, health, search
+from studiodesk.api import actions, ask, bugs, health, pages, search
+from studiodesk.api import voice as voice_api
 from studiodesk.api.deps import get_settings
 from studiodesk.api.ratelimit import build_limiter, rate_limit_exceeded_handler
 from studiodesk.config import Settings
@@ -31,6 +33,7 @@ from studiodesk.llm.limits import LLMConcurrencyGate
 from studiodesk.logging import configure_logging
 from studiodesk.middleware import BodySizeLimitMiddleware
 from studiodesk.vectorstore import QdrantStore, build_qdrant_client
+from studiodesk.voice import ElevenLabsClient, build_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,7 @@ class Injected:
     proposals: ProposalStore | None = None
     github: GitHubIssues | None = None
     slack: SlackNotifier | None = None
+    voice: ElevenLabsClient | None = None
 
 
 def _build_store(settings: Settings, stack: ExitStack) -> QdrantStore:
@@ -89,6 +93,23 @@ def _build_outbound(
     return github, slack
 
 
+def _build_voice(
+    settings: Settings, injected: Injected, stack: ExitStack
+) -> ElevenLabsClient | None:
+    """Return the injected ElevenLabs client, or build one when an API key is configured.
+
+    Its own outbound client: no redirects, `trust_env=False`, ElevenLabs timeout.
+    """
+    if injected.voice is not None:
+        return injected.voice
+    if settings.elevenlabs_api_key is None:
+        logger.info("voice not configured: GET /voice/session returns 503")
+        return None
+    http = build_http_client(settings.elevenlabs_timeout_s)
+    stack.callback(http.close)
+    return ElevenLabsClient(http, settings.elevenlabs_api_key, settings.elevenlabs_timeout_s)
+
+
 def _make_lifespan(settings: Settings, injected: Injected) -> Lifespan:
     """Build the lifespan that puts every collaborator on `app.state`.
 
@@ -121,6 +142,7 @@ def _make_lifespan(settings: Settings, injected: Injected) -> Lifespan:
                 )
             )
             app.state.github, app.state.slack = _build_outbound(settings, injected, stack)
+            app.state.voice = _build_voice(settings, injected, stack)
             if not settings.actions_enabled:
                 logger.warning("issue filing disabled: proposals are preview-only")
             logger.info("resources ready", extra={"collection": app.state.store.collection})
@@ -138,6 +160,8 @@ def create_app(
     proposals: ProposalStore | None = None,
     github: GitHubIssues | None = None,
     slack: SlackNotifier | None = None,
+    voice: ElevenLabsClient | None = None,
+    static_dir: Path = pages.STATIC_DIR,
 ) -> FastAPI:
     """Build the StudioDesk FastAPI app.
 
@@ -150,6 +174,8 @@ def create_app(
         proposals: Store for proposed actions. In-memory TTL store if None.
         github: GitHub issue client. Built from settings if None (None if not configured).
         slack: Slack notifier. Built from settings if None (no-op without a webhook).
+        voice: ElevenLabs client. Built from settings if None (None without an API key).
+        static_dir: Directory served at `/static` (and `/voice` from its `voice.html`).
 
     Returns:
         A configured FastAPI instance.
@@ -165,6 +191,7 @@ def create_app(
         proposals=proposals,
         github=github,
         slack=slack,
+        voice=voice,
     )
     app = FastAPI(
         title="StudioDesk",
@@ -186,6 +213,10 @@ def create_app(
     app.include_router(ask.build_router(limiter, resolved.ask_rate_limit))
     app.include_router(bugs.build_router(limiter, resolved.bugs_rate_limit))
     app.include_router(actions.build_router(limiter, resolved.actions_rate_limit))
+    app.include_router(voice_api.build_router(limiter, resolved.voice_rate_limit))
+    app.include_router(pages.build_router(static_dir))
+    if static_dir.is_dir():
+        app.mount("/static", pages.SecureStaticFiles(directory=static_dir), name="static")
 
     logger.info("app created", extra={"env": resolved.app_env, "version": resolved.app_version})
     return app

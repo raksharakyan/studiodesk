@@ -18,12 +18,14 @@ from studiodesk.embeddings import Embedder
 from studiodesk.llm import LLMClient
 from studiodesk.llm.limits import GatedLLM, LLMConcurrencyGate
 from studiodesk.vectorstore import QdrantStore
+from studiodesk.voice import ElevenLabsClient
 
 SERVICE_UNAVAILABLE_DETAIL = "Search is temporarily unavailable"
 LLM_UNAVAILABLE_DETAIL = "The assistant is temporarily unavailable"
 LLM_NOT_CONFIGURED_DETAIL = "LLM not configured"
 ACTIONS_UNAVAILABLE_DETAIL = "Actions are temporarily unavailable"
 ISSUES_UNAVAILABLE_DETAIL = "Issue filing is temporarily unavailable"
+VOICE_NOT_CONFIGURED_DETAIL = "Voice is not configured"
 
 
 @lru_cache(maxsize=1)
@@ -100,3 +102,18 @@ def get_slack(request: Request) -> SlackNotifier:
     if slack is None:
         raise HTTPException(status_code=503, detail=ACTIONS_UNAVAILABLE_DETAIL)
     return slack
+
+
+def get_voice(request: Request) -> ElevenLabsClient:
+    """Return the ElevenLabs client, or 503 when no ElevenLabs API key is configured."""
+    voice: ElevenLabsClient | None = getattr(request.app.state, "voice", None)
+    if voice is None:
+        raise HTTPException(status_code=503, detail=VOICE_NOT_CONFIGURED_DETAIL)
+    return voice
+
+
+def get_voice_agent_id(settings: Annotated[Settings, Depends(get_settings)]) -> str:
+    """Return the configured ElevenLabs agent id, or 503 when it is not set."""
+    if not settings.elevenlabs_agent_id:
+        raise HTTPException(status_code=503, detail=VOICE_NOT_CONFIGURED_DETAIL)
+    return settings.elevenlabs_agent_id
