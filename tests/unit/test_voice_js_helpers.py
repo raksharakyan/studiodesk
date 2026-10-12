@@ -201,8 +201,32 @@ def test_no_inline_scripts_in_html() -> None:
         assert match.group(2).strip() == ""
 
 
+def _code_only(js: str) -> str:
+    """voice.js with // line comments removed, so prose mentioning storage is not counted."""
+    return re.sub(r"(?m)^\s*//.*$", "", js)
+
+
 def test_confirm_token_never_stored_outside_module_state(voice_js: str) -> None:
-    for sink in ("localStorage", "sessionStorage", "document.cookie", "history.pushState"):
-        assert sink not in voice_js
+    code = _code_only(voice_js)
+    sinks = ("localStorage", "indexedDB", "document.cookie", "history.pushState")
+    for sink in (*sinks, "history.replaceState"):
+        assert sink not in code
     assert not re.search(r"dataset\.\w*token", voice_js, re.I)
     assert not re.search(r"setAttribute\([^)]*token", voice_js, re.I)
+    # The token / action id never reach a storage API, even indirectly on the same line.
+    for line in code.splitlines():
+        if re.search(r"Storage|setItem|getItem|removeItem", line):
+            assert not re.search(r"token|action_?id", line, re.I), line
+
+
+def test_session_storage_holds_only_the_greeted_flag(voice_js: str) -> None:
+    """The only allowed web-storage use: the per-tab "greeted" boolean (greet once per tab)."""
+    code = _code_only(voice_js)
+    assert re.search(r'export const GREETED_STORAGE_KEY = "studiodesk\.voice\.greeted";', code)
+    uses = re.findall(r"[\w.]*sessionStorage[^\n;]*", code)
+    assert uses == [
+        'window.sessionStorage?.getItem(GREETED_STORAGE_KEY) === "1"',
+        'window.sessionStorage?.setItem(GREETED_STORAGE_KEY, "1")',
+    ]
+    # No other storage calls on any object (aliases such as `const s = sessionStorage`).
+    assert len(re.findall(r"\.(?:setItem|getItem|removeItem|clear)\(", code)) == 2

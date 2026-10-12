@@ -3,6 +3,7 @@
 // Security rules (see docs/security/m3-review.md):
 // - All server, model and corpus text is rendered with textContent / createElement only.
 // - The confirm token lives only in a module variable: never in the DOM, URL or storage.
+// - The only thing in web storage is the non-sensitive per-tab "greeted" flag (sessionStorage).
 // - The voice agent has no confirm tool. Confirm and Cancel run only on real button clicks.
 // - Fetches are same-origin with a JSON body; no secrets live in this file.
 
@@ -775,6 +776,46 @@ let conversation = null;
 let connecting = false;
 let stopRequested = false;
 
+// Greet once per browser tab. Calls end server-side after a few minutes, and a fresh session
+// would replay the agent's first message; after the first connect we start silently instead.
+// The flag is a non-sensitive boolean in sessionStorage (per tab, cleared when the tab closes);
+// storage can throw (privacy modes, sandboxed frames), so an in-memory flag backs it up.
+export const GREETED_STORAGE_KEY = "studiodesk.voice.greeted";
+export const SILENT_START_HINT = "Listening — go ahead and speak.";
+let greetedInMemory = false;
+
+/**
+ * The `overrides` for Conversation.startSession (@elevenlabs/client 1.27.0 BaseSessionConfig:
+ * overrides.agent.firstMessage, sent as conversation_config_override.agent.first_message).
+ * An empty firstMessage makes the agent start silently and listen. Requires the agent's
+ * first_message override to be enabled in its platform settings.
+ */
+export function buildSessionOverrides(greetedBefore) {
+  return greetedBefore === true ? { agent: { firstMessage: "" } } : {};
+}
+
+function hasGreeted() {
+  if (greetedInMemory) return true;
+  try {
+    return window.sessionStorage?.getItem(GREETED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markGreeted() {
+  greetedInMemory = true;
+  try {
+    window.sessionStorage?.setItem(GREETED_STORAGE_KEY, "1");
+  } catch {
+    // Storage unavailable: the in-memory flag still covers this page load.
+  }
+}
+
+function setVoiceHint(text) {
+  $("voice-hint").textContent = text;
+}
+
 function setVoiceError(message) {
   const node = $("voice-error");
   node.textContent = asText(message);
@@ -802,7 +843,10 @@ function setVoiceStatus(status) {
   button.setAttribute("aria-pressed", active ? "true" : "false");
   button.querySelector('[data-role="toggle-state"]').textContent = active ? "On" : "Off";
   button.querySelector('[data-role="toggle-label"]').textContent = active ? "Stop voice conversation" : "Start voice conversation";
-  if (status !== "connected") setMode("idle");
+  if (status !== "connected") {
+    setMode("idle");
+    setVoiceHint("");
+  }
 }
 
 function setMode(mode) {
@@ -817,6 +861,8 @@ function appendTranscript(role, message) {
   // Agent speech can carry ElevenLabs audio tags ("[happy]"); they are voice directions, not text.
   const text = isUser ? asText(message).trim() : stripAudioTags(message);
   if (!text) return;
+  // Once the conversation is under way the "go ahead and speak" hint has done its job.
+  setVoiceHint("");
   show("transcript-empty", false);
   const list = $("transcript");
   const item = el("li", isUser ? "from-user" : "from-agent");
@@ -893,12 +939,21 @@ async function startVoice() {
       return;
     }
 
+    const overrides = buildSessionOverrides(hasGreeted());
+    const silentStart = Object.keys(overrides).length > 0;
     const started = await sdk.Conversation.startSession({
       signedUrl,
       connectionType: "websocket",
       clientTools,
       workletPaths: { ...WORKLET_PATHS },
-      onConnect: () => setVoiceStatus("connected"),
+      // Omitted entirely on the first call so the agent's configured greeting plays.
+      ...(silentStart ? { overrides } : {}),
+      onConnect: () => {
+        setVoiceStatus("connected");
+        markGreeted();
+        if (silentStart) setVoiceHint(SILENT_START_HINT);
+      },
+      // Never restarts on its own: a new session only starts from a Start click (onVoiceToggle).
       onDisconnect: (details) => {
         conversation = null;
         setVoiceStatus("disconnected");
