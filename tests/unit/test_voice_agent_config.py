@@ -661,3 +661,46 @@ def test_prompt_has_silence_rules(config: VoiceAgentConfig) -> None:
     assert "never repeat 'are you still there' or offer more help unprompted" in prompt
     assert "Do not end your answers with offers like" in prompt
     assert "wait patiently" not in prompt
+
+
+# --- extra edges (qa) ----------------------------------------------------------------
+
+
+def test_duration_message_length_bounds() -> None:
+    ok = VoiceAgentConfig.model_validate(_config(max_conversation_duration_message="x" * 500))
+    assert ok.max_conversation_duration_message == "x" * 500
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(_config(max_conversation_duration_message="x" * 501))
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", "false", None])
+def test_first_message_override_must_be_a_json_boolean(value: object) -> None:
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(_config(client_overrides={"first_message": value}))
+
+
+def test_only_first_message_override_can_ever_be_true() -> None:
+    def leaves(node: object, path: str = "") -> dict[str, object]:
+        if isinstance(node, dict):
+            out: dict[str, object] = {}
+            for key, value in node.items():
+                out.update(leaves(value, f"{path}.{key}" if path else key))
+            return out
+        return {path: node}
+
+    for allowed in (True, False):
+        cfg = VoiceAgentConfig.model_validate(_config(client_overrides={"first_message": allowed}))
+        payload = agent_payload(cfg, llm="l", tool_ids=[], allow_hosts=[])
+        flat = leaves(payload["platform_settings"]["overrides"]["conversation_config_override"])
+        assert flat.pop("agent.first_message") is allowed
+        assert flat and all(value is False for value in flat.values()), flat
+
+
+def test_skip_turn_is_the_only_built_in_and_cannot_act(config: VoiceAgentConfig) -> None:
+    built_in = agent_payload(config, llm="l", tool_ids=[], allow_hosts=[])["conversation_config"][
+        "agent"
+    ]["prompt"]["built_in_tools"]
+    assert list(built_in) == ["skip_turn"]
+    description = built_in["skip_turn"]["description"].lower()
+    for word in ("confirm", "file", "issue", "end the call", "transfer"):
+        assert word not in description, word

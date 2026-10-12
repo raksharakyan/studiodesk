@@ -67,6 +67,7 @@ export function installDom() {
     contextual: [],
     sessionOptions: null,
     startSessionImpl: null,
+    startCalls: [], // options passed to every Conversation.startSession call
   };
   const byId = (id) => {
     if (!state.elements.has(id)) state.elements.set(id, new FakeElement("div", id));
@@ -86,7 +87,14 @@ export function installDom() {
     isSecureContext: true,
     setTimeout: (fn, ms) => { state.timers.push({ fn, ms, fired: false }); return state.timers.length; },
     addEventListener: () => {},
-    ElevenLabsClient: { Conversation: { startSession: (options) => state.startSessionImpl(options) } },
+    ElevenLabsClient: {
+      Conversation: {
+        startSession: (options) => {
+          state.startCalls.push(options);
+          return state.startSessionImpl(options);
+        },
+      },
+    },
   };
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,

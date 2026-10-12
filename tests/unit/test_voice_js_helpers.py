@@ -67,6 +67,25 @@ RUNNERS = {
             "console output never carries the signed URL or SDK message text",
         ],
     },
+    "voice_greeting.test.mjs": {
+        "min_tests": 23,
+        "required": [
+            "buildSessionOverrides(true) is the empty first message",
+            "buildSessionOverrides is {} for anything but true",
+            "buildSessionOverrides returns a fresh object each call",
+            "first start greets (no overrides key); after onConnect the next start is silent",
+            "storage that already holds '1' gives a silent first start",
+            "a throwing sessionStorage getter still greets once via memory",
+            "getItem and setItem that throw still greets once via memory",
+            "if startSession rejects, the flag is not set and the next start greets",
+            "if onConnect never fires, the flag is not set and the next start greets",
+            "the hint shows only on a silent start, after connect",
+            "an empty or tag-only transcript line keeps the hint; the first real line clears it",
+            "the hint is cleared on disconnect",
+            'onDisconnect({reason: "agent"}) never restarts the session',
+            'onDisconnect({reason: "error"}) never restarts the session',
+        ],
+    },
     "voice_preview.test.mjs": {
         "min_tests": 30,
         "required": [
@@ -230,3 +249,31 @@ def test_session_storage_holds_only_the_greeted_flag(voice_js: str) -> None:
     ]
     # No other storage calls on any object (aliases such as `const s = sessionStorage`).
     assert len(re.findall(r"\.(?:setItem|getItem|removeItem|clear)\(", code)) == 2
+
+
+# --- greet once per tab: page and agent config must agree ----------------------------
+
+
+def test_voice_hint_is_a_polite_status_region() -> None:
+    html = VOICE_HTML.read_text(encoding="utf-8")
+    tags = re.findall(r'<[^>]*\bid="voice-hint"[^>]*>', html)
+    assert len(tags) == 1
+    [tag] = tags
+    assert 'role="status"' in tag
+    assert 'aria-live="polite"' in tag
+
+
+def test_session_override_matches_what_agent_json_allows(voice_js: str) -> None:
+    """The page may only send the one override the agent allows (else the session fails)."""
+    body = re.search(
+        r"export function buildSessionOverrides\(greetedBefore\) \{\n(.*?)\n\}", voice_js, re.S
+    )
+    assert body is not None
+    assert body.group(1).strip() == (
+        'return greetedBefore === true ? { agent: { firstMessage: "" } } : {};'
+    )
+    agent = json.loads((REPO_ROOT / "voice" / "agent.json").read_text(encoding="utf-8"))
+    assert agent["client_overrides"] == {"first_message": True}
+    # The SDK call gets `overrides` only from buildSessionOverrides, and only when silent.
+    assert re.search(r"\.\.\.\(silentStart \? \{ overrides \} : \{\}\)", voice_js)
+    assert "const overrides = buildSessionOverrides(hasGreeted());" in voice_js
