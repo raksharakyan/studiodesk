@@ -443,3 +443,64 @@ def test_prompt_has_tone_silence_and_preview_rules(config: VoiceAgentConfig) -> 
     assert "Never write audio or emotion tags or any text in square brackets" in prompt
     assert "don't ask whether they are still there more than once" in prompt
     assert "Bug check section of the page, with Confirm and Cancel buttons" in prompt
+
+
+# --- tts never touches the agent's model or voice ------------------------------------
+
+MANAGED_TTS_KEYS = {"expressive_mode", "stability"}
+MANAGED_TURN_KEYS = {"turn_timeout", "turn_eagerness"}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({}, id="defaults"),
+        pytest.param({"tts": {"expressive_mode": True, "stability": 0.1}}, id="custom-tts"),
+        pytest.param({"turn": {"turn_timeout": 5, "turn_eagerness": "normal"}}, id="custom-turn"),
+    ],
+)
+def test_payload_never_sends_tts_model_or_voice(overrides: dict[str, Any]) -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(**overrides))
+    for hosts in ([], ["localhost"]):
+        conversation_config = agent_payload(cfg, llm="l", tool_ids=["t"], allow_hosts=hosts)[
+            "conversation_config"
+        ]
+        assert set(conversation_config["tts"]) == MANAGED_TTS_KEYS
+        assert set(conversation_config["turn"]) == MANAGED_TURN_KEYS
+        assert set(conversation_config) == {"agent", "conversation", "tts", "turn"}
+        for key in ("model_id", "voice_id", "agent_output_audio_format", "optimize_streaming"):
+            assert key not in json.dumps(conversation_config), key
+
+
+def test_real_agent_json_payload_never_sends_tts_model_or_voice(config: VoiceAgentConfig) -> None:
+    payload = agent_payload(config, llm="l", tool_ids=["t"], allow_hosts=[])
+    assert set(payload["conversation_config"]["tts"]) == MANAGED_TTS_KEYS
+    assert "model_id" not in json.dumps(payload)
+    # voice_id appears only as a disabled client override, never as a value to set.
+    assert payload["platform_settings"]["overrides"]["conversation_config_override"]["tts"] == {
+        "voice_id": False
+    }
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_stability_rejects_non_finite_values(value: str) -> None:
+    data = json.loads(
+        json.dumps(_config()).replace('"tools"', f'"tts": {{"stability": {value}}}, "tools"')
+    )
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+def test_turn_timeout_rejects_non_finite_values(value: str) -> None:
+    data = json.loads(
+        json.dumps(_config()).replace('"tools"', f'"turn": {{"turn_timeout": {value}}}, "tools"')
+    )
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(data)
+
+
+def test_prompt_forbids_square_brackets_which_stripping_relies_on(config: VoiceAgentConfig) -> None:
+    # voice.js strips audio tags from agent lines; its "a[b]c" limitation is acceptable only
+    # because the prompt tells the agent never to write square brackets.
+    assert "any text in square brackets" in config.prompt

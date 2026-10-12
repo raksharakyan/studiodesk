@@ -1,9 +1,11 @@
 """Run the voice.js node test runners in tests/js/ and source-level checks on voice.js.
 
 - voice_helpers.test.mjs: the pure exported helpers (no DOM).
-- voice_dom.test.mjs: voice.js loaded with an in-memory DOM, fetch and a fake ElevenLabs SDK,
-  driving the real clientTools (pending-proposal guard, arm delay, trusted-click confirm,
-  console logging).
+- voice_dom.test.mjs: voice.js loaded with an in-memory DOM, fetch and a fake ElevenLabs SDK
+  (tests/js/dom_shim.mjs), driving the real clientTools (pending-proposal guard, arm delay,
+  trusted-click confirm, console logging).
+- voice_preview.test.mjs: the issue preview (pending banner, scroll and focus, visibility
+  guard, server-clock expiry timer) and audio-tag stripping in the transcript.
 
 The node runners are skipped when node is not installed; the source checks always run.
 Each runner prints one JSON line per JS test; failures are reported with name and message.
@@ -30,7 +32,7 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 RUNNERS = {
     "voice_helpers.test.mjs": {
-        "min_tests": 28,
+        "min_tests": 36,
         "required": [
             "normalisePlatform maps spoken names",
             "extractVersion pulls x.y.z out of speech",
@@ -45,6 +47,13 @@ RUNNERS = {
             "friendlyError session messages for the new 503s",
             "friendlyError never echoes a raw server detail",
             "toAgentPendingResult is the fixed object",
+            "stripAudioTags removes ElevenLabs audio tags",
+            "stripAudioTags keeps ids, platforms, versions and non-tag brackets",
+            "stripAudioTags known limitation: a short bracketed word inside a word is removed",
+            "proposalLifetimeMs is expires_at minus the server Date",
+            "proposalLifetimeMs is 0 when expired",
+            "proposalLifetimeMs is capped at 2^31-1",
+            "proposalLifetimeMs is null for missing or invalid input",
         ],
     },
     "voice_dom.test.mjs": {
@@ -56,6 +65,26 @@ RUNNERS = {
             "the confirm arm delay is 3000 ms",
             "confirm ignores untrusted clicks and clicks before the arm delay",
             "console output never carries the signed URL or SDK message text",
+        ],
+    },
+    "voice_preview.test.mjs": {
+        "min_tests": 30,
+        "required": [
+            "banner shows after an agent check with a ready proposal and hides on confirm",
+            "banner shows after a form check with a ready proposal and hides on cancel",
+            "banner stays hidden for duplicate and disabled results (agent and form)",
+            "banner hides when confirm returns 404",
+            "banner hides when confirm returns 409",
+            "banner hides when confirm returns 410",
+            "a check with a ready proposal scrolls to the preview and focuses its heading",
+            "a pending second agent call scrolls and focuses the preview again without fetching",
+            "guard warns and forces the preview visible when #proposal hidden",
+            "without a Date header only the arm timer is scheduled",
+            "a Date header schedules the expiry timer from expires_at minus Date",
+            "expiry retires the current idle proposal",
+            "a stale expiry timer does not retire a newer proposal",
+            "expiry does not retire a proposal whose confirm is in flight",
+            "agent transcript lines have audio tags stripped; user lines are kept as said",
         ],
     },
 }
@@ -123,6 +152,19 @@ def test_console_calls_log_only_literals_and_err_name(voice_js: str) -> None:
     assert not bad, f"console calls with non-literal arguments: {bad}"
     total = len(re.findall(r"\bconsole\.", voice_js))
     assert total == len(calls), "a console call was not parsed (check it by hand)"
+
+
+def test_console_messages_are_the_known_fixed_strings(voice_js: str) -> None:
+    messages = set(re.findall(r'console\.\w+\(\s*"([^"]*)"', voice_js))
+    assert messages == {
+        "StudioDesk voice: SDK reported an error",
+        "StudioDesk voice: start failed",
+        "StudioDesk voice: stop failed",
+        "StudioDesk: proposal pending but not visible",
+    }
+    assert re.search(
+        r'console\.warn\("StudioDesk: proposal pending but not visible"\);', voice_js
+    ), "the visibility guard warning must be a fixed string with no arguments"
 
 
 def test_err_name_returns_only_a_bounded_name(voice_js: str) -> None:

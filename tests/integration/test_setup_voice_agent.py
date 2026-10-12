@@ -481,3 +481,19 @@ def test_dry_run_shows_duration_and_overrides(
     assert '"conversation_config_override"' in out
     assert '"expressive_mode": false' in out
     assert '"turn_eagerness": "patient"' in out
+
+
+def test_create_and_update_never_send_tts_model_or_voice(script: ModuleType) -> None:
+    fake = FakeElevenLabs()
+    assert run(script, fake, []) == 0
+    [agent_id] = fake.agents
+    assert run(script, fake, [], settings(elevenlabs_agent_id=agent_id)) == 0
+    bodies = _agent_bodies(fake)
+    assert [method for method, _ in bodies] == ["POST", "PATCH"]
+    for _, body in bodies:
+        tts = body["conversation_config"]["tts"]
+        assert set(tts) == {"expressive_mode", "stability"}
+        assert "model_id" not in json.dumps(body)
+        assert body["platform_settings"]["overrides"]["conversation_config_override"]["tts"] == {
+            "voice_id": False
+        }

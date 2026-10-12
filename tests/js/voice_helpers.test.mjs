@@ -16,7 +16,7 @@ if (!voicePath) {
 const mod = await import(pathToFileURL(voicePath).href);
 
 // 2. ApiError is exported, so friendlyError can be tested with real instances.
-const { ApiError, friendlyError, detailCode, formatWait, toAgentPendingResult } = mod;
+const { ApiError, friendlyError, detailCode, formatWait, toAgentPendingResult, stripAudioTags, proposalLifetimeMs } = mod;
 assert.equal(typeof ApiError, "function");
 
 const tests = [];
@@ -27,7 +27,7 @@ test("exports the documented helpers", () => {
   for (const name of [
     "toAgentAskResult", "toAgentBugResult", "buildBugCheckBody", "normalisePlatform",
     "extractVersion", "safeIssueUrl", "isProposalReady", "friendlyError",
-    "ApiError", "detailCode", "formatWait", "toAgentPendingResult",
+    "ApiError", "detailCode", "formatWait", "toAgentPendingResult", "stripAudioTags", "proposalLifetimeMs",
   ]) {
     assert.equal(typeof mod[name], "function", name);
   }
@@ -362,6 +362,66 @@ test("toAgentPendingResult is the fixed object", () => {
   });
   assert.equal(toAgentPendingResult(), text);
   for (const word of ["confirm_token", "action_id", "token"]) assert.ok(!text.includes(word), word);
+});
+
+// --- stripAudioTags -----------------------------------------------------------------
+test("stripAudioTags removes ElevenLabs audio tags", () => {
+  assert.equal(stripAudioTags("[happy] Great! If you have a bug"), "Great! If you have a bug");
+  assert.equal(stripAudioTags("[happy] Hi  there [slow] friend [clears throat] ok"), "Hi there friend ok");
+  assert.equal(stripAudioTags("[Excited][sad]  Sorry"), "Sorry");
+  assert.equal(stripAudioTags("  [happy]  "), "");
+  assert.equal(stripAudioTags("[whispers]"), "");
+});
+
+test("stripAudioTags keeps ids, platforms, versions and non-tag brackets", () => {
+  for (const text of [
+    "That matches [BR-0001].",
+    "It happens on [PS5].",
+    "Fixed in [1.0.2].",
+    "See [BR 12]",
+    "[]",
+    "[ happy]",
+    "[a-very-long-tag-name-over-25-chars]",
+  ]) {
+    assert.equal(stripAudioTags(text), text, text);
+  }
+});
+
+test("stripAudioTags handles non-text input", () => {
+  assert.equal(stripAudioTags(null), "");
+  assert.equal(stripAudioTags(undefined), "");
+  assert.equal(stripAudioTags(42), "42");
+});
+
+test("stripAudioTags known limitation: a short bracketed word inside a word is removed", () => {
+  // Documented behaviour, not a goal: "[b]" looks like an audio tag, so "a[b]c" becomes "ac".
+  // Acceptable because only agent speech is filtered and the prompt forbids square brackets.
+  assert.equal(stripAudioTags("a[b]c"), "ac");
+});
+
+// --- proposalLifetimeMs -------------------------------------------------------------
+test("proposalLifetimeMs is expires_at minus the server Date", () => {
+  assert.equal(proposalLifetimeMs("2026-10-12T12:10:00Z", "Mon, 12 Oct 2026 12:00:00 GMT"), 600_000);
+  assert.equal(proposalLifetimeMs("2026-10-12T12:00:01.500Z", "Mon, 12 Oct 2026 12:00:00 GMT"), 1_500);
+  assert.equal(proposalLifetimeMs("2026-10-12T14:00:00+02:00", "Mon, 12 Oct 2026 11:59:00 GMT"), 60_000);
+});
+
+test("proposalLifetimeMs is 0 when expired", () => {
+  assert.equal(proposalLifetimeMs("2026-10-12T11:00:00Z", "Mon, 12 Oct 2026 12:00:00 GMT"), 0);
+  assert.equal(proposalLifetimeMs("2026-10-12T12:00:00Z", "Mon, 12 Oct 2026 12:00:00 GMT"), 0);
+});
+
+test("proposalLifetimeMs is capped at 2^31-1", () => {
+  assert.equal(proposalLifetimeMs("2099-01-01T00:00:00Z", "Mon, 12 Oct 2026 12:00:00 GMT"), 2 ** 31 - 1);
+});
+
+test("proposalLifetimeMs is null for missing or invalid input", () => {
+  const date = "Mon, 12 Oct 2026 12:00:00 GMT";
+  const expires = "2026-10-12T12:10:00Z";
+  for (const [e, d] of [[null, date], [undefined, date], ["", date], ["soon", date], [expires, null],
+    [expires, undefined], [expires, ""], [expires, "yesterday"], [null, null], [{}, date]]) {
+    assert.equal(proposalLifetimeMs(e, d), null, `${e} / ${d}`);
+  }
 });
 
 // --- run ----------------------------------------------------------------------------
