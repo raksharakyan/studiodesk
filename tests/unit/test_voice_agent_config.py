@@ -207,6 +207,12 @@ def _config(**overrides: Any) -> dict[str, Any]:
         pytest.param(_config(language="eng"), id="bad-language"),
         pytest.param(_config(extra="x"), id="extra-top-level-key"),
         pytest.param(_config(prompt=""), id="empty-prompt"),
+        pytest.param(_config(built_in_tools=["end_call"]), id="built-in-end-call"),
+        pytest.param(_config(built_in_tools=["transfer_to_number"]), id="built-in-transfer"),
+        pytest.param(_config(built_in_tools=["skip_turn", "skip_turn"]), id="built-in-repeat"),
+        pytest.param(_config(turn={"turn_timeout": 31}), id="turn-timeout-31"),
+        pytest.param(_config(turn={"turn_timeout": 0.5}), id="turn-timeout-below-1"),
+        pytest.param(_config(max_conversation_duration_message=""), id="empty-duration-msg"),
     ],
 )
 def test_invalid_configs_rejected(data: dict[str, Any]) -> None:
@@ -242,7 +248,12 @@ def test_agent_payload_enables_auth_and_wires_tools(config: VoiceAgentConfig) ->
         },
     }
     agent = payload["conversation_config"]["agent"]
-    assert agent["prompt"] == {"prompt": config.prompt, "llm": "llm-x", "tool_ids": ["t1", "t2"]}
+    assert agent["prompt"] == {
+        "prompt": config.prompt,
+        "llm": "llm-x",
+        "tool_ids": ["t1", "t2"],
+        "built_in_tools": EXPECTED_SKIP_TURN,
+    }
     assert agent["first_message"] == config.first_message
     assert agent["language"] == "en"
     assert payload["name"] == config.name
@@ -354,7 +365,7 @@ def test_overrides_are_all_false() -> None:
 def test_agent_json_tts_and_turn(config: VoiceAgentConfig) -> None:
     assert config.tts.expressive_mode is False
     assert config.tts.stability == 0.6
-    assert config.turn.turn_timeout == 20.0
+    assert config.turn.turn_timeout == 30.0
     assert config.turn.turn_eagerness == "patient"
 
 
@@ -362,7 +373,7 @@ def test_tts_and_turn_defaults_when_omitted() -> None:
     cfg = VoiceAgentConfig.model_validate(_config())
     assert cfg.tts.expressive_mode is False
     assert cfg.tts.stability == 0.6
-    assert cfg.turn.turn_timeout == 20.0
+    assert cfg.turn.turn_timeout == 30.0
     assert cfg.turn.turn_eagerness == "patient"
 
 
@@ -372,7 +383,7 @@ def test_stability_bounds_accepted(value: float) -> None:
     assert cfg.tts.stability == value
 
 
-@pytest.mark.parametrize("value", [5.0, 60.0])
+@pytest.mark.parametrize("value", [1.0, 30.0])
 def test_turn_timeout_bounds_accepted(value: float) -> None:
     cfg = VoiceAgentConfig.model_validate(_config(turn={"turn_timeout": value}))
     assert cfg.turn.turn_timeout == value
@@ -403,8 +414,8 @@ def test_tts_invalid_rejected(tts: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     "turn",
     [
-        {"turn_timeout": 4.9},
-        {"turn_timeout": 60.1},
+        {"turn_timeout": 0.9},
+        {"turn_timeout": 30.1},
         {"turn_timeout": -1},
         {"turn_eagerness": "lazy"},
         {"mode": "turn"},
@@ -420,28 +431,28 @@ def test_agent_payload_sends_only_managed_tts_and_turn_keys(config: VoiceAgentCo
     conversation_config = payload["conversation_config"]
     # Only these keys, so a PATCH keeps the agent's model_id, voice_id and other turn fields.
     assert conversation_config["tts"] == {"expressive_mode": False, "stability": 0.6}
-    assert conversation_config["turn"] == {"turn_timeout": 20.0, "turn_eagerness": "patient"}
+    assert conversation_config["turn"] == {"turn_timeout": 30.0, "turn_eagerness": "patient"}
 
 
 def test_agent_payload_uses_custom_tts_and_turn() -> None:
     cfg = VoiceAgentConfig.model_validate(
         _config(
             tts={"expressive_mode": True, "stability": 0.3},
-            turn={"turn_timeout": 45, "turn_eagerness": "eager"},
+            turn={"turn_timeout": 15, "turn_eagerness": "eager"},
         )
     )
     conversation_config = agent_payload(cfg, llm="l", tool_ids=[], allow_hosts=[])[
         "conversation_config"
     ]
     assert conversation_config["tts"] == {"expressive_mode": True, "stability": 0.3}
-    assert conversation_config["turn"] == {"turn_timeout": 45.0, "turn_eagerness": "eager"}
+    assert conversation_config["turn"] == {"turn_timeout": 15.0, "turn_eagerness": "eager"}
 
 
 def test_prompt_has_tone_silence_and_preview_rules(config: VoiceAgentConfig) -> None:
     prompt = config.prompt
     assert "calm, neutral, friendly tone" in prompt
     assert "Never write audio or emotion tags or any text in square brackets" in prompt
-    assert "don't ask whether they are still there more than once" in prompt
+    assert "check in at most once in the whole conversation" in prompt
     assert "Bug check section of the page, with Confirm and Cancel buttons" in prompt
 
 
@@ -543,3 +554,68 @@ def test_prompt_bug_section_maps_spoken_platforms_and_versions(config: VoiceAgen
     targets = re.findall(r"\bis ([a-z0-9_]+)\b", section)
     platform_values = {p.value for p in Platform}
     assert {"ps5", "xbox_series", "switch", "pc"} <= set(targets) & platform_values
+
+
+# --- silence handling: turn timeout, skip_turn, duration message ---------------------
+
+EXPECTED_SKIP_TURN = {
+    "skip_turn": {
+        "type": "system",
+        "name": "skip_turn",
+        "description": (
+            "Stay silent and keep waiting for the user. Use it whenever the user is silent and "
+            "you have already checked in once in this conversation, or when the user asks for "
+            "a moment."
+        ),
+        "params": {"system_tool_type": "skip_turn"},
+    }
+}
+
+
+def test_agent_json_turn_timeout_is_max(config: VoiceAgentConfig) -> None:
+    assert config.turn.turn_timeout == 30.0
+
+
+def test_turn_timeout_30_accepted() -> None:
+    parsed = VoiceAgentConfig.model_validate(_config(turn={"turn_timeout": 30}))
+    assert parsed.turn.turn_timeout == 30.0
+
+
+def test_built_in_tools_payload_is_exactly_skip_turn(config: VoiceAgentConfig) -> None:
+    payload = agent_payload(config, llm="l", tool_ids=["t1"], allow_hosts=[])
+    assert payload["conversation_config"]["agent"]["prompt"]["built_in_tools"] == (
+        EXPECTED_SKIP_TURN
+    )
+
+
+def test_no_tool_can_file_confirm_transfer_or_end_call(config: VoiceAgentConfig) -> None:
+    payload = agent_payload(config, llm="l", tool_ids=["t1"], allow_hosts=[])
+    built_in = payload["conversation_config"]["agent"]["prompt"]["built_in_tools"]
+    assert set(built_in) == {"skip_turn"}
+    names = [tool.name for tool in config.tools] + list(built_in)
+    for name in names:
+        assert not FORBIDDEN_NAME.search(name), name
+        assert not re.search(r"transfer|end_call|keypad|voicemail", name), name
+
+
+def test_built_in_tools_default_empty() -> None:
+    parsed = VoiceAgentConfig.model_validate(_config())
+    payload = agent_payload(parsed, llm="l", tool_ids=[], allow_hosts=[])
+    assert payload["conversation_config"]["agent"]["prompt"]["built_in_tools"] == {}
+    assert "max_conversation_duration_message" not in payload["conversation_config"]["agent"]
+
+
+def test_duration_message_in_payload(config: VoiceAgentConfig) -> None:
+    payload = agent_payload(config, llm="l", tool_ids=[], allow_hosts=[])
+    assert payload["conversation_config"]["agent"]["max_conversation_duration_message"] == (
+        "We've reached the three-minute limit for this call. Press Start to talk again."
+    )
+
+
+def test_prompt_has_silence_rules(config: VoiceAgentConfig) -> None:
+    prompt = config.prompt
+    assert "check in at most once in the whole conversation with one short question" in prompt
+    assert "call skip_turn and say nothing" in prompt
+    assert "never repeat 'are you still there' or offer more help unprompted" in prompt
+    assert "Do not end your answers with offers like" in prompt
+    assert "wait patiently" not in prompt

@@ -440,9 +440,12 @@ def test_create_and_update_send_duration_and_overrides(script: ModuleType) -> No
         assert body["platform_settings"]["auth"]["enable_auth"] is True
         assert body["conversation_config"]["tts"] == {"expressive_mode": False, "stability": 0.6}
         assert body["conversation_config"]["turn"] == {
-            "turn_timeout": 20.0,
+            "turn_timeout": 30.0,
             "turn_eagerness": "patient",
         }
+        agent = body["conversation_config"]["agent"]
+        assert list(agent["prompt"]["built_in_tools"]) == ["skip_turn"]
+        assert agent["max_conversation_duration_message"].startswith("We've reached")
 
 
 def test_custom_duration_from_config_file(script: ModuleType, tmp_path: Path) -> None:
@@ -481,6 +484,9 @@ def test_dry_run_shows_duration_and_overrides(
     assert '"conversation_config_override"' in out
     assert '"expressive_mode": false' in out
     assert '"turn_eagerness": "patient"' in out
+    assert '"turn_timeout": 30.0' in out
+    assert '"system_tool_type": "skip_turn"' in out
+    assert '"max_conversation_duration_message": "We\'ve reached the three-minute limit' in out
 
 
 def test_create_and_update_never_send_tts_model_or_voice(script: ModuleType) -> None:

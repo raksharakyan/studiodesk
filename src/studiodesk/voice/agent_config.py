@@ -2,8 +2,9 @@
 
 The file holds the agent's name, first message, language, system prompt, client tool
 definitions, conversation limits (`conversation.max_duration_seconds`, default 180), voice
-delivery (`tts`: expressive mode off, stability) and turn-taking (`turn`: how long to wait
-in silence and how eagerly to take the turn).
+delivery (`tts`: expressive mode off, stability), turn-taking (`turn`: how long to wait
+in silence and how eagerly to take the turn), the message spoken when the duration cap is
+hit, and an allowlist of ElevenLabs built-in system tools (only `skip_turn` is supported).
 The agent's LLM comes from `Settings.voice_llm`; tool ids come from the workspace at setup
 time. Payload shapes follow the ElevenLabs Agents API
 (`POST /v1/convai/tools`, `POST /v1/convai/agents/create`).
@@ -29,8 +30,19 @@ DEFAULT_MAX_DURATION_S = 180
 # transcripts, so it is off by default.
 DEFAULT_EXPRESSIVE_MODE = False
 DEFAULT_STABILITY = 0.6
-# Seconds of user silence before the agent speaks again ("Are you still there?").
-DEFAULT_TURN_TIMEOUT_S = 20.0
+# Seconds of user silence before the agent takes the turn; ElevenLabs allows 1-30.
+MIN_TURN_TIMEOUT_S = 1.0
+MAX_TURN_TIMEOUT_S = 30.0
+DEFAULT_TURN_TIMEOUT_S = MAX_TURN_TIMEOUT_S
+# The only built-in system tool StudioDesk may enable. `skip_turn` lets the agent stay
+# silent on its turn; every other built-in (end_call, transfers, ...) stays off, so the
+# agent cannot act outside the two client tools.
+BuiltInToolName = Literal["skip_turn"]
+SKIP_TURN_DESCRIPTION = (
+    "Stay silent and keep waiting for the user. Use it whenever the user is silent and you "
+    "have already checked in once in this conversation, or when the user asks for a moment."
+)
+_BUILT_IN_TOOL_DESCRIPTIONS: dict[str, str] = {"skip_turn": SKIP_TURN_DESCRIPTION}
 
 
 class VoiceToolConfig(BaseModel):
@@ -83,7 +95,9 @@ class VoiceTurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout: float = Field(default=DEFAULT_TURN_TIMEOUT_S, ge=5.0, le=60.0)
+    turn_timeout: float = Field(
+        default=DEFAULT_TURN_TIMEOUT_S, ge=MIN_TURN_TIMEOUT_S, le=MAX_TURN_TIMEOUT_S
+    )
     turn_eagerness: Literal["patient", "normal", "eager"] = "patient"
 
 
@@ -100,6 +114,20 @@ class VoiceAgentConfig(BaseModel):
     conversation: VoiceConversationConfig = Field(default_factory=VoiceConversationConfig)
     tts: VoiceTtsConfig = Field(default_factory=VoiceTtsConfig)
     turn: VoiceTurnConfig = Field(default_factory=VoiceTurnConfig)
+    # Spoken when `conversation.max_duration_seconds` is reached. Verify live: the field
+    # path follows the ElevenLabs Agents API docs and has not been checked against the API.
+    max_conversation_duration_message: str | None = Field(
+        default=None, min_length=1, max_length=500
+    )
+    built_in_tools: list[BuiltInToolName] = Field(default_factory=list, max_length=1)
+
+    @field_validator("built_in_tools")
+    @classmethod
+    def _unique_built_in_tools(cls, value: list[str]) -> list[str]:
+        """Each built-in tool may be enabled once."""
+        if len(value) != len(set(value)):
+            raise ValueError("built-in tool names must be unique")
+        return value
 
     @field_validator("tools")
     @classmethod
@@ -155,6 +183,23 @@ def tool_payload(tool: VoiceToolConfig) -> dict[str, Any]:
     return tool.model_dump(mode="json")
 
 
+def built_in_tools_payload(names: list[BuiltInToolName]) -> dict[str, Any]:
+    """`conversation_config.agent.prompt.built_in_tools` holding only the allowed tools.
+
+    Any built-in not listed here (end_call, transfer_to_agent, transfer_to_number, ...) is
+    simply absent from the payload, so it is never enabled by StudioDesk.
+    """
+    return {
+        name: {
+            "type": "system",
+            "name": name,
+            "description": _BUILT_IN_TOOL_DESCRIPTIONS[name],
+            "params": {"system_tool_type": name},
+        }
+        for name in names
+    }
+
+
 def agent_payload(
     config: VoiceAgentConfig, *, llm: str, tool_ids: list[str], allow_hosts: list[str]
 ) -> dict[str, Any]:
@@ -164,19 +209,29 @@ def agent_payload(
     sent only when hosts are given, so an update without `--allow-host` leaves it as is.
     Every client-side override is disabled on each run (see `disabled_client_overrides`).
     `tts` and `turn` carry only the keys StudioDesk manages, so a PATCH leaves their
-    siblings (model, voice, other timeouts) untouched.
+    siblings (model, voice, other timeouts) untouched. `built_in_tools` is always sent and
+    holds only the allowlisted tools (at most `skip_turn`).
     """
     auth: dict[str, Any] = {"enable_auth": True}
     if allow_hosts:
         auth["allowlist"] = [{"hostname": host} for host in allow_hosts]
+    agent: dict[str, Any] = {
+        "first_message": config.first_message,
+        "language": config.language,
+        "prompt": {
+            "prompt": config.prompt,
+            "llm": llm,
+            "tool_ids": tool_ids,
+            "built_in_tools": built_in_tools_payload(config.built_in_tools),
+        },
+    }
+    if config.max_conversation_duration_message is not None:
+        # verify live: field path per the ElevenLabs Agents API docs, not checked live.
+        agent["max_conversation_duration_message"] = config.max_conversation_duration_message
     return {
         "name": config.name,
         "conversation_config": {
-            "agent": {
-                "first_message": config.first_message,
-                "language": config.language,
-                "prompt": {"prompt": config.prompt, "llm": llm, "tool_ids": tool_ids},
-            },
+            "agent": agent,
             "conversation": {
                 "max_duration_seconds": config.conversation.max_duration_seconds,
             },
