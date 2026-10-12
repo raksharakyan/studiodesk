@@ -15,7 +15,7 @@ It ships with a measured evaluation suite and a security review for every milest
 | **Duplicate detection** (`/bugs/check`) | A similarity threshold shortlists candidates, then the LLM confirms. The response names the **original** report, not just the nearest match. |
 | **Routing** | kNN over similar past bugs suggests component and severity labels. |
 | **Confirmed actions** | A new bug gets an issue *preview* plus a single-use, 15-minute confirm token. Nothing is filed until a person clicks Confirm. Slack alerts are optional. |
-| **Voice** (`/voice`) | An ElevenLabs Agent calls the same backend through two browser-side tools. The voice agent **cannot** file issues; only the on-screen Confirm button can. |
+| **Voice** (`/voice`, in review in [PR #1](https://github.com/raksharakyan/studiodesk/pull/1)) | An ElevenLabs Agent calls the same backend through two browser-side tools. The voice agent **cannot** file issues; only the on-screen Confirm button can. |
 
 ## Architecture
 
@@ -107,7 +107,7 @@ docs/security/    per-milestone security reviews
 
 ## Status and next steps
 
-Done: ingestion and search, cited answers, duplicate detection, confirmed actions, evals, voice. In progress: the main web UI and deployment (Railway/Render), plus fuller docs.
+Done: ingestion and search, cited answers, duplicate detection, confirmed actions, evals. In review: voice ([PR #1](https://github.com/raksharakyan/studiodesk/pull/1)). Next: the main web UI and deployment (Railway/Render), plus fuller docs.
 
 Known weak spots:
 - kNN routing accuracy is 0.57; an LLM or label-description classifier is the next experiment.
