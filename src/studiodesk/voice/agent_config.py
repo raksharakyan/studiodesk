@@ -1,7 +1,9 @@
 """The voice agent's config-as-code (`voice/agent.json`) and the API payloads built from it.
 
 The file holds the agent's name, first message, language, system prompt, client tool
-definitions and conversation limits (`conversation.max_duration_seconds`, default 180).
+definitions, conversation limits (`conversation.max_duration_seconds`, default 180), voice
+delivery (`tts`: expressive mode off, stability) and turn-taking (`turn`: how long to wait
+in silence and how eagerly to take the turn).
 The agent's LLM comes from `Settings.voice_llm`; tool ids come from the workspace at setup
 time. Payload shapes follow the ElevenLabs Agents API
 (`POST /v1/convai/tools`, `POST /v1/convai/agents/create`).
@@ -23,6 +25,12 @@ ALLOW_HOST_PATTERN = re.compile(
 MAX_ALLOW_HOSTS = 10
 # Hard cap on one conversation's length; bounds the ElevenLabs cost of a single session.
 DEFAULT_MAX_DURATION_S = 180
+# Expressive mode makes the voice exaggerated and lets audio tags ("[happy]") leak into
+# transcripts, so it is off by default.
+DEFAULT_EXPRESSIVE_MODE = False
+DEFAULT_STABILITY = 0.6
+# Seconds of user silence before the agent speaks again ("Are you still there?").
+DEFAULT_TURN_TIMEOUT_S = 20.0
 
 
 class VoiceToolConfig(BaseModel):
@@ -58,6 +66,27 @@ class VoiceConversationConfig(BaseModel):
     max_duration_seconds: int = Field(default=DEFAULT_MAX_DURATION_S, ge=10, le=3600)
 
 
+class VoiceTtsConfig(BaseModel):
+    """Voice delivery settings (a subset of `conversation_config.tts`).
+
+    Only these keys are sent, so the model and voice configured on the agent stay as they are.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expressive_mode: bool = DEFAULT_EXPRESSIVE_MODE
+    stability: float = Field(default=DEFAULT_STABILITY, ge=0.0, le=1.0)
+
+
+class VoiceTurnConfig(BaseModel):
+    """Turn-taking settings (a subset of `conversation_config.turn`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    turn_timeout: float = Field(default=DEFAULT_TURN_TIMEOUT_S, ge=5.0, le=60.0)
+    turn_eagerness: Literal["patient", "normal", "eager"] = "patient"
+
+
 class VoiceAgentConfig(BaseModel):
     """The whole `voice/agent.json` file."""
 
@@ -69,6 +98,8 @@ class VoiceAgentConfig(BaseModel):
     prompt: str = Field(min_length=1, max_length=20_000)
     tools: list[VoiceToolConfig] = Field(min_length=1, max_length=10)
     conversation: VoiceConversationConfig = Field(default_factory=VoiceConversationConfig)
+    tts: VoiceTtsConfig = Field(default_factory=VoiceTtsConfig)
+    turn: VoiceTurnConfig = Field(default_factory=VoiceTurnConfig)
 
     @field_validator("tools")
     @classmethod
@@ -131,7 +162,9 @@ def agent_payload(
 
     Auth is always enabled (sessions need a server-minted signed URL). The allowlist is
     sent only when hosts are given, so an update without `--allow-host` leaves it as is.
-    Every client-side override is disabled on each run (see `DISABLED_CLIENT_OVERRIDES`).
+    Every client-side override is disabled on each run (see `disabled_client_overrides`).
+    `tts` and `turn` carry only the keys StudioDesk manages, so a PATCH leaves their
+    siblings (model, voice, other timeouts) untouched.
     """
     auth: dict[str, Any] = {"enable_auth": True}
     if allow_hosts:
@@ -147,6 +180,8 @@ def agent_payload(
             "conversation": {
                 "max_duration_seconds": config.conversation.max_duration_seconds,
             },
+            "tts": config.tts.model_dump(mode="json"),
+            "turn": config.turn.model_dump(mode="json"),
         },
         "platform_settings": {
             "auth": auth,

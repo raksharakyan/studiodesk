@@ -438,6 +438,11 @@ def test_create_and_update_send_duration_and_overrides(script: ModuleType) -> No
         assert body["conversation_config"]["conversation"] == {"max_duration_seconds": 180}
         assert body["platform_settings"]["overrides"] == EXPECTED_OVERRIDES
         assert body["platform_settings"]["auth"]["enable_auth"] is True
+        assert body["conversation_config"]["tts"] == {"expressive_mode": False, "stability": 0.6}
+        assert body["conversation_config"]["turn"] == {
+            "turn_timeout": 20.0,
+            "turn_eagerness": "patient",
+        }
 
 
 def test_custom_duration_from_config_file(script: ModuleType, tmp_path: Path) -> None:
@@ -474,3 +479,5 @@ def test_dry_run_shows_duration_and_overrides(
     out = capsys.readouterr().out
     assert '"max_duration_seconds": 180' in out
     assert '"conversation_config_override"' in out
+    assert '"expressive_mode": false' in out
+    assert '"turn_eagerness": "patient"' in out

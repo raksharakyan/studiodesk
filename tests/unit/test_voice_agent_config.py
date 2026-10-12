@@ -346,3 +346,100 @@ def test_overrides_are_all_false() -> None:
 
     values = leaves(EXPECTED_OVERRIDES)
     assert values and all(value is False for value in values)
+
+
+# --- voice delivery (tts) and turn-taking --------------------------------------------
+
+
+def test_agent_json_tts_and_turn(config: VoiceAgentConfig) -> None:
+    assert config.tts.expressive_mode is False
+    assert config.tts.stability == 0.6
+    assert config.turn.turn_timeout == 20.0
+    assert config.turn.turn_eagerness == "patient"
+
+
+def test_tts_and_turn_defaults_when_omitted() -> None:
+    cfg = VoiceAgentConfig.model_validate(_config())
+    assert cfg.tts.expressive_mode is False
+    assert cfg.tts.stability == 0.6
+    assert cfg.turn.turn_timeout == 20.0
+    assert cfg.turn.turn_eagerness == "patient"
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0])
+def test_stability_bounds_accepted(value: float) -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(tts={"stability": value}))
+    assert cfg.tts.stability == value
+
+
+@pytest.mark.parametrize("value", [5.0, 60.0])
+def test_turn_timeout_bounds_accepted(value: float) -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(turn={"turn_timeout": value}))
+    assert cfg.turn.turn_timeout == value
+
+
+@pytest.mark.parametrize("eagerness", ["patient", "normal", "eager"])
+def test_turn_eagerness_values_accepted(eagerness: str) -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(turn={"turn_eagerness": eagerness}))
+    assert cfg.turn.turn_eagerness == eagerness
+
+
+@pytest.mark.parametrize(
+    "tts",
+    [
+        {"stability": -0.1},
+        {"stability": 1.1},
+        {"stability": "high"},
+        {"expressive_mode": "maybe"},
+        {"model_id": "eleven_v4_turbo"},
+        {"voice_id": "abc"},
+    ],
+)
+def test_tts_invalid_rejected(tts: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(_config(tts=tts))
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"turn_timeout": 4.9},
+        {"turn_timeout": 60.1},
+        {"turn_timeout": -1},
+        {"turn_eagerness": "lazy"},
+        {"mode": "turn"},
+    ],
+)
+def test_turn_invalid_rejected(turn: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        VoiceAgentConfig.model_validate(_config(turn=turn))
+
+
+def test_agent_payload_sends_only_managed_tts_and_turn_keys(config: VoiceAgentConfig) -> None:
+    payload = agent_payload(config, llm="l", tool_ids=["t"], allow_hosts=[])
+    conversation_config = payload["conversation_config"]
+    # Only these keys, so a PATCH keeps the agent's model_id, voice_id and other turn fields.
+    assert conversation_config["tts"] == {"expressive_mode": False, "stability": 0.6}
+    assert conversation_config["turn"] == {"turn_timeout": 20.0, "turn_eagerness": "patient"}
+
+
+def test_agent_payload_uses_custom_tts_and_turn() -> None:
+    cfg = VoiceAgentConfig.model_validate(
+        _config(
+            tts={"expressive_mode": True, "stability": 0.3},
+            turn={"turn_timeout": 45, "turn_eagerness": "eager"},
+        )
+    )
+    conversation_config = agent_payload(cfg, llm="l", tool_ids=[], allow_hosts=[])[
+        "conversation_config"
+    ]
+    assert conversation_config["tts"] == {"expressive_mode": True, "stability": 0.3}
+    assert conversation_config["turn"] == {"turn_timeout": 45.0, "turn_eagerness": "eager"}
+
+
+def test_prompt_has_tone_silence_and_preview_rules(config: VoiceAgentConfig) -> None:
+    prompt = config.prompt
+    assert "calm, neutral, friendly tone" in prompt
+    assert "Never write audio or emotion tags or any text in square brackets" in prompt
+    assert "don't ask whether they are still there more than once" in prompt
+    assert "Bug check section of the page, with Confirm and Cancel buttons" in prompt
