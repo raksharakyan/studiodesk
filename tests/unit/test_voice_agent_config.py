@@ -213,6 +213,16 @@ def _config(**overrides: Any) -> dict[str, Any]:
         pytest.param(_config(turn={"turn_timeout": 31}), id="turn-timeout-31"),
         pytest.param(_config(turn={"turn_timeout": 0.5}), id="turn-timeout-below-1"),
         pytest.param(_config(max_conversation_duration_message=""), id="empty-duration-msg"),
+        pytest.param(_config(client_overrides={"prompt": True}), id="override-prompt"),
+        pytest.param(_config(client_overrides={"language": True}), id="override-language"),
+        pytest.param(_config(client_overrides={"voice_id": True}), id="override-voice"),
+        pytest.param(_config(client_overrides={"llm": True}), id="override-llm"),
+        pytest.param(_config(client_overrides={"tool_ids": True}), id="override-tool-ids"),
+        pytest.param(
+            _config(client_overrides={"first_message": True, "tts": {"voice_id": True}}),
+            id="override-extra-key",
+        ),
+        pytest.param(_config(client_overrides={"first_message": "yes"}), id="override-not-bool"),
     ],
 )
 def test_invalid_configs_rejected(data: dict[str, Any]) -> None:
@@ -242,7 +252,7 @@ def test_agent_payload_enables_auth_and_wires_tools(config: VoiceAgentConfig) ->
         "auth": {"enable_auth": True},
         "overrides": {
             "conversation_config_override": {
-                "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+                "agent": {"prompt": {"prompt": False}, "first_message": True, "language": False},
                 "tts": {"voice_id": False},
             }
         },
@@ -304,7 +314,7 @@ def test_validate_allow_hosts_caps_count() -> None:
 
 EXPECTED_OVERRIDES = {
     "conversation_config_override": {
-        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "agent": {"prompt": {"prompt": False}, "first_message": True, "language": False},
         "tts": {"voice_id": False},
     }
 }
@@ -349,14 +359,46 @@ def test_agent_payload_sends_duration_and_disabled_overrides(config: VoiceAgentC
         assert payload["platform_settings"]["auth"]["enable_auth"] is True
 
 
-def test_overrides_are_all_false() -> None:
-    def leaves(node: object) -> list[object]:
-        if isinstance(node, dict):
-            return [leaf for value in node.values() for leaf in leaves(value)]
-        return [node]
+def _override_leaves(node: object, path: str = "") -> dict[str, object]:
+    if isinstance(node, dict):
+        return {
+            leaf_path: leaf
+            for key, value in node.items()
+            for leaf_path, leaf in _override_leaves(value, f"{path}.{key}" if path else key).items()
+        }
+    return {path: node}
 
-    values = leaves(EXPECTED_OVERRIDES)
-    assert values and all(value is False for value in values)
+
+FIRST_MESSAGE_PATH = "conversation_config_override.agent.first_message"
+
+
+def test_only_first_message_override_is_enabled(config: VoiceAgentConfig) -> None:
+    assert config.client_overrides.first_message is True
+    overrides = agent_payload(config, llm="l", tool_ids=["t"], allow_hosts=[])["platform_settings"][
+        "overrides"
+    ]
+    leaves = _override_leaves(overrides)
+    assert leaves.pop(FIRST_MESSAGE_PATH) is True
+    assert leaves and all(value is False for value in leaves.values())
+
+
+def test_overrides_default_to_all_false() -> None:
+    cfg = VoiceAgentConfig.model_validate(_config())
+    assert cfg.client_overrides.first_message is False
+    overrides = agent_payload(cfg, llm="l", tool_ids=["t"], allow_hosts=[])["platform_settings"][
+        "overrides"
+    ]
+    leaves = _override_leaves(overrides)
+    assert FIRST_MESSAGE_PATH in leaves
+    assert all(value is False for value in leaves.values())
+
+
+def test_explicit_first_message_false_keeps_all_overrides_off() -> None:
+    cfg = VoiceAgentConfig.model_validate(_config(client_overrides={"first_message": False}))
+    overrides = agent_payload(cfg, llm="l", tool_ids=[], allow_hosts=[])["platform_settings"][
+        "overrides"
+    ]
+    assert all(value is False for value in _override_leaves(overrides).values())
 
 
 # --- voice delivery (tts) and turn-taking --------------------------------------------

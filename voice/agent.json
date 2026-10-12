@@ -78,5 +78,8 @@
   "max_conversation_duration_message": "We've reached the three-minute limit for this call. Press Start to talk again.",
   "built_in_tools": [
     "skip_turn"
-  ]
+  ],
+  "client_overrides": {
+    "first_message": true
+  }
 }

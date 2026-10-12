@@ -4,7 +4,8 @@ The file holds the agent's name, first message, language, system prompt, client 
 definitions, conversation limits (`conversation.max_duration_seconds`, default 180), voice
 delivery (`tts`: expressive mode off, stability), turn-taking (`turn`: how long to wait
 in silence and how eagerly to take the turn), the message spoken when the duration cap is
-hit, and an allowlist of ElevenLabs built-in system tools (only `skip_turn` is supported).
+hit, an allowlist of ElevenLabs built-in system tools (only `skip_turn` is supported), and
+which client-side overrides the browser may use (`client_overrides`: only `first_message`).
 The agent's LLM comes from `Settings.voice_llm`; tool ids come from the workspace at setup
 time. Payload shapes follow the ElevenLabs Agents API
 (`POST /v1/convai/tools`, `POST /v1/convai/agents/create`).
@@ -15,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 TOOL_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 # A hostname (optionally with a port) for platform_settings.auth.allowlist.
@@ -101,6 +102,21 @@ class VoiceTurnConfig(BaseModel):
     turn_eagerness: Literal["patient", "normal", "eager"] = "patient"
 
 
+class VoiceClientOverridesConfig(BaseModel):
+    """Client-side overrides the browser may send when it starts a session.
+
+    Only `first_message` can be allowed. It lets the page start later calls in the same
+    tab silently (`{agent: {firstMessage: ""}}`). That is safe: a client can only change
+    the greeting its own browser hears, never what other users hear. The system prompt,
+    language, voice/TTS, LLM and tools stay locked, so no client can change the agent's
+    behaviour. Any other key is rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    first_message: StrictBool = False
+
+
 class VoiceAgentConfig(BaseModel):
     """The whole `voice/agent.json` file."""
 
@@ -120,6 +136,7 @@ class VoiceAgentConfig(BaseModel):
         default=None, min_length=1, max_length=500
     )
     built_in_tools: list[BuiltInToolName] = Field(default_factory=list, max_length=1)
+    client_overrides: VoiceClientOverridesConfig = Field(default_factory=VoiceClientOverridesConfig)
 
     @field_validator("built_in_tools")
     @classmethod
@@ -162,18 +179,25 @@ def validate_allow_hosts(hosts: list[str]) -> list[str]:
     return cleaned
 
 
-def disabled_client_overrides() -> dict[str, Any]:
-    """`platform_settings.overrides.conversation_config_override` with every override off.
+def client_overrides_payload(allowed: VoiceClientOverridesConfig) -> dict[str, Any]:
+    """`platform_settings.overrides.conversation_config_override` for the agent.
 
-    The browser must not be able to replace the system prompt, first message, language or
-    voice when it starts a session, so each is sent as `false` explicitly (not left to the
-    ElevenLabs default); the setup script re-asserts this on every run.
+    Every override is sent explicitly (not left to the ElevenLabs default) and the setup
+    script re-asserts it on every run. Only `first_message` may be enabled, via
+    `client_overrides.first_message` in agent.json: a client can then only change the
+    greeting its own browser hears (the page uses it to start later calls in a tab
+    silently). The system prompt, language and voice stay `false`, and the LLM and tools
+    are not overridable at all, so the browser cannot change the agent's behaviour.
     Verify field shape live: this follows the ElevenLabs Agents API docs as of M5 and has
     not been checked against the live API.
     """
     # verify field shape live (ElevenLabs may ignore unknown keys silently).
     return {
-        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "agent": {
+            "prompt": {"prompt": False},
+            "first_message": allowed.first_message,
+            "language": False,
+        },
         "tts": {"voice_id": False},
     }
 
@@ -207,7 +231,8 @@ def agent_payload(
 
     Auth is always enabled (sessions need a server-minted signed URL). The allowlist is
     sent only when hosts are given, so an update without `--allow-host` leaves it as is.
-    Every client-side override is disabled on each run (see `disabled_client_overrides`).
+    Every client-side override except an allowed `first_message` is disabled on each run
+    (see `client_overrides_payload`).
     `tts` and `turn` carry only the keys StudioDesk manages, so a PATCH leaves their
     siblings (model, voice, other timeouts) untouched. `built_in_tools` is always sent and
     holds only the allowlisted tools (at most `skip_turn`).
@@ -240,6 +265,8 @@ def agent_payload(
         },
         "platform_settings": {
             "auth": auth,
-            "overrides": {"conversation_config_override": disabled_client_overrides()},
+            "overrides": {
+                "conversation_config_override": client_overrides_payload(config.client_overrides)
+            },
         },
     }

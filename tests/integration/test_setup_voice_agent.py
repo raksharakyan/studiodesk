@@ -408,11 +408,11 @@ def test_injected_http_client_is_not_closed(script: ModuleType) -> None:
     assert not http.is_closed
 
 
-# --- conversation limit and disabled client overrides --------------------------------
+# --- conversation limit and client overrides (only first_message allowed) ------------
 
 EXPECTED_OVERRIDES = {
     "conversation_config_override": {
-        "agent": {"prompt": {"prompt": False}, "first_message": False, "language": False},
+        "agent": {"prompt": {"prompt": False}, "first_message": True, "language": False},
         "tts": {"voice_id": False},
     }
 }
