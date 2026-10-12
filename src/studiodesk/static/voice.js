@@ -83,7 +83,11 @@ export function detailCode(body) {
   return typeof detail === "string" && Object.hasOwn(KNOWN_DETAILS, detail) ? KNOWN_DETAILS[detail] : null;
 }
 
-async function api(method, path, body) {
+/**
+ * Same-origin JSON request. If `meta` is given, `meta.serverDate` receives the response Date
+ * header (or null), so expiry can be timed against the server clock, not the client clock.
+ */
+async function api(method, path, body, meta) {
   const init = {
     method,
     headers: { Accept: "application/json" },
@@ -111,6 +115,7 @@ async function api(method, path, body) {
     }
     throw new ApiError(response.status, Number.isFinite(retry) && retry > 0 ? retry : null, code);
   }
+  if (meta) meta.serverDate = response.headers.get("Date");
   try {
     return await response.json();
   } catch {
@@ -182,6 +187,27 @@ function errName(err) {
 
 function asText(value) {
   return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+// ElevenLabs v3 audio tags such as "[happy]", "[sad]", "[slow]" or "[clears throat]": a letter,
+// then up to 24 letters, spaces or hyphens. Digits are not allowed, so ids like "[BR-0001]" stay.
+const AUDIO_TAG_RE = /\[[a-z][a-z \-]{0,24}\]\s*/gi;
+
+/** Remove audio tags from agent text for display, collapse doubled spaces and trim. */
+export function stripAudioTags(value) {
+  return asText(value).replace(AUDIO_TAG_RE, "").replace(/ {2,}/g, " ").trim();
+}
+
+/**
+ * Milliseconds until a proposal expires, measured on the server clock: `expires_at` minus the
+ * response Date header. Null when either is missing or invalid (then no expiry timer is set
+ * and the server's 410 on Confirm or Cancel is the expiry signal). Clamped to setTimeout's range.
+ */
+export function proposalLifetimeMs(expiresAt, serverDate) {
+  const expires = Date.parse(asText(expiresAt));
+  const now = Date.parse(asText(serverDate));
+  if (!Number.isFinite(expires) || !Number.isFinite(now)) return null;
+  return Math.min(Math.max(0, expires - now), 2 ** 31 - 1);
 }
 
 /** Map spoken platform names to the API enum, or null. */
@@ -420,6 +446,49 @@ function hasPendingProposal() {
   return Boolean(currentProposal && !currentProposal.done);
 }
 
+/** The banner near the voice controls is shown exactly while a proposal is pending. */
+function syncProposalBanner() {
+  const pending = hasPendingProposal();
+  show("proposal-banner", pending);
+  $("proposal").classList.toggle("is-pending", pending);
+}
+
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+}
+
+/** Guard against a render or CSS bug hiding a pending preview: warn and force it visible. */
+function ensureProposalVisible() {
+  if (!hasPendingProposal()) return;
+  const node = $("proposal");
+  const height = node.getBoundingClientRect?.().height;
+  if (node.hidden || $("bug-result").hidden || $("bug-panel").hidden || height === 0) {
+    console.warn("StudioDesk: proposal pending but not visible");
+    $("bug-panel").hidden = false;
+    $("bug-result").hidden = false;
+    node.hidden = false;
+    node.classList.add("is-forced-visible");
+  }
+}
+
+/** Scroll `target` into view (no smooth scroll under reduced motion) and focus `focusId`. */
+function scrollAndFocus(target, focusId) {
+  target.scrollIntoView?.({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  $(focusId).focus?.({ preventScroll: true });
+}
+
+/** Bring the issue preview into view and focus its heading. */
+function revealProposal() {
+  ensureProposalVisible();
+  scrollAndFocus($("proposal"), "proposal-heading");
+}
+
+/** After a check renders: show the preview if there is one, otherwise the verdict. */
+function revealBugResult() {
+  if (!$("proposal").hidden) revealProposal();
+  else scrollAndFocus($("bug-result"), "bug-result-heading");
+}
+
 function setPreviewChanged(changed) {
   $("proposal").classList.toggle("is-changed", changed);
   const notice = $("proposal-changed");
@@ -454,8 +523,23 @@ function renderCandidates(candidates) {
   }
 }
 
-function renderProposal(proposal, { changed = false } = {}) {
+/** Expiry timer callback: retire the proposal unless it was already settled or is in flight. */
+function expireProposal(state) {
+  if (currentProposal !== state || state.busy || state.done) return;
+  state.done = true;
+  state.token = null;
   currentProposal = null;
+  setActionButtons({ confirm: false, cancel: false });
+  setPreviewChanged(false);
+  syncProposalBanner();
+  setStatus("action-status", "This issue preview expired. Nothing was filed. Check the bug again for a new preview.");
+  tellAgent("The issue preview expired before the user confirmed it. No issue was filed.");
+}
+
+function renderProposal(proposal, { changed = false, serverDate = null } = {}) {
+  currentProposal = null;
+  syncProposalBanner();
+  $("proposal").classList.remove("is-forced-visible");
   setPreviewChanged(false);
   setStatus("action-status", "");
   show("action-result", false);
@@ -488,6 +572,7 @@ function renderProposal(proposal, { changed = false } = {}) {
   if (changed) setPreviewChanged(true);
   const state = { actionId: proposal.action_id, token: proposal.confirm_token, armed: false, busy: false, done: false };
   currentProposal = state;
+  syncProposalBanner();
   setActionButtons({ confirm: false, cancel: true });
   window.setTimeout(() => {
     if (currentProposal === state && !state.busy && !state.done) {
@@ -495,9 +580,11 @@ function renderProposal(proposal, { changed = false } = {}) {
       setActionButtons({ confirm: true, cancel: true });
     }
   }, CONFIRM_ARM_DELAY_MS);
+  const lifetime = proposalLifetimeMs(proposal.expires_at, serverDate);
+  if (lifetime !== null) window.setTimeout(() => expireProposal(state), lifetime);
 }
 
-function renderBugResult(data, { changed = false } = {}) {
+function renderBugResult(data, { changed = false, serverDate = null } = {}) {
   show("bug-result", true);
   setText("bug-verdict", VERDICT_LABELS[data.verdict] ?? asText(data.verdict));
 
@@ -517,7 +604,7 @@ function renderBugResult(data, { changed = false } = {}) {
   setText("routing-component", data.routing?.component ?? "unknown");
   setText("routing-severity", data.routing?.severity ?? "unknown");
   fillTags("routing-labels", data.routing?.labels);
-  renderProposal(data.proposed_action, { changed });
+  renderProposal(data.proposed_action, { changed, serverDate });
 }
 
 /**
@@ -529,18 +616,21 @@ async function runBugCheck(body, origin) {
   const seq = ++bugSeq;
   setStatus("bug-status", "Checking for duplicates…");
   try {
-    const data = await api("POST", "/bugs/check", body);
+    const meta = {};
+    const data = await api("POST", "/bugs/check", body, meta);
     if (origin === "agent" && hasPendingProposal()) {
       // A preview appeared while this check ran. Never swap it under the user: keep it.
       if (seq === bugSeq) setStatus("bug-status", AGENT_BLOCKED_STATUS);
+      revealProposal();
       return { ok: false, blocked: true };
     }
     if (seq === bugSeq) {
       // Only the user's own form submit can replace a pending preview; flag the change.
       const changed = hasPendingProposal() && isProposalReady(data.proposed_action);
-      renderBugResult(data, { changed });
+      renderBugResult(data, { changed, serverDate: meta.serverDate });
       const suffix = isProposalReady(data.proposed_action) ? " Review the issue preview and press Confirm to file it." : "";
       setStatus("bug-status", `Bug check complete: ${VERDICT_LABELS[data.verdict] ?? asText(data.verdict)}.${suffix}`);
+      revealBugResult();
     }
     return { ok: true, data };
   } catch (err) {
@@ -573,6 +663,7 @@ async function onConfirmClick(event) {
     state.done = true;
     state.token = null;
     if (currentProposal === state) currentProposal = null;
+    syncProposalBanner();
     setPreviewChanged(false);
     const result = $("action-result");
     result.replaceChildren();
@@ -603,6 +694,7 @@ async function onConfirmClick(event) {
       state.done = true;
       state.token = null;
       if (currentProposal === state) currentProposal = null;
+      syncProposalBanner();
       setPreviewChanged(false);
       $("action-status").focus();
     } else if (currentProposal === state) {
@@ -622,6 +714,7 @@ async function onCancelClick(event) {
     state.done = true;
     state.token = null;
     if (currentProposal === state) currentProposal = null;
+    syncProposalBanner();
     setPreviewChanged(false);
     setStatus("action-status", "Cancelled. Nothing was filed.");
     $("action-status").focus();
@@ -634,6 +727,7 @@ async function onCancelClick(event) {
       state.done = true;
       state.token = null;
       if (currentProposal === state) currentProposal = null;
+      syncProposalBanner();
       setPreviewChanged(false);
       $("action-status").focus();
     } else if (currentProposal === state) {
@@ -659,6 +753,7 @@ const clientTools = {
     // A pending preview is never replaced by the agent: the user must confirm or cancel it first.
     if (hasPendingProposal()) {
       setStatus("bug-status", AGENT_BLOCKED_STATUS);
+      revealProposal();
       return toAgentPendingResult();
     }
     const built = buildBugCheckBody(params);
@@ -718,11 +813,12 @@ function setMode(mode) {
 }
 
 function appendTranscript(role, message) {
-  const text = asText(message).trim();
+  const isUser = role === "user";
+  // Agent speech can carry ElevenLabs audio tags ("[happy]"); they are voice directions, not text.
+  const text = isUser ? asText(message).trim() : stripAudioTags(message);
   if (!text) return;
   show("transcript-empty", false);
   const list = $("transcript");
-  const isUser = role === "user";
   const item = el("li", isUser ? "from-user" : "from-agent");
   item.append(el("span", "speaker", isUser ? "You" : "Agent"));
   item.append(document.createTextNode(text));
@@ -902,6 +998,7 @@ function init() {
   $("bug-form").addEventListener("submit", onBugSubmit);
   $("confirm-btn").addEventListener("click", onConfirmClick);
   $("cancel-btn").addEventListener("click", onCancelClick);
+  $("proposal-banner-btn").addEventListener("click", revealProposal);
   window.addEventListener("pagehide", () => {
     if (conversation) void conversation.endSession();
   });

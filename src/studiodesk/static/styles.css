@@ -151,6 +151,17 @@ main:focus {
   gap: 1rem;
 }
 
+/* Each column stacks its panels. DOM order (voice, transcript, typing, bug check, answer) is
+   the reading order on phones and column by column on wide screens. */
+.column {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+}
+
+/* Wide screens: the voice controls span the top; the transcript and typing form sit beside
+   the bug check and answer, so results are visible during a call. */
 @media (min-width: 56rem) {
   .layout {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -294,6 +305,25 @@ textarea {
 .voice-toggle[aria-pressed="true"] .toggle-state {
   background: var(--primary);
   color: var(--on-primary);
+}
+
+/* "Issue preview ready" banner next to the voice controls, shown while a preview is pending. */
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: var(--user-bubble);
+  border: 2px solid var(--primary);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+}
+
+.banner-text {
+  margin: 0;
+  font-weight: 700;
 }
 
 .voice-state p {
@@ -476,6 +506,26 @@ textarea {
   margin-top: 1rem;
   padding-top: 0.5rem;
   border-top: 1px solid var(--border);
+  scroll-margin-top: 0.75rem;
+}
+
+/* A pending (confirmable) preview is framed so it stands out from the rest of the result. */
+.proposal.is-pending {
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 3px solid var(--primary);
+  border-radius: var(--radius);
+}
+
+/* Set only by the "pending but not visible" guard in voice.js. */
+.proposal.is-forced-visible {
+  display: block !important;
+  visibility: visible !important;
+}
+
+/* Headings that receive focus from script (tabindex="-1") show a ring however focus arrived. */
+h3[tabindex="-1"]:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* A preview that replaced a pending one is outlined until it is confirmed or cancelled.
@@ -503,7 +553,8 @@ textarea {
 .issue-body {
   margin: 0;
   padding: 0.75rem;
-  max-height: 22rem;
+  /* Capped by the viewport too, so Confirm and Cancel stay on screen with the heading. */
+  max-height: min(22rem, 35vh);
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
