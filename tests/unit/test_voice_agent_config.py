@@ -504,3 +504,42 @@ def test_prompt_forbids_square_brackets_which_stripping_relies_on(config: VoiceA
     # voice.js strips audio tags from agent lines; its "a[b]c" limitation is acceptable only
     # because the prompt tells the agent never to write square brackets.
     assert "any text in square brackets" in config.prompt
+
+
+# --- bug-report slot filling ---------------------------------------------------------
+
+
+def _bug_section(prompt: str) -> str:
+    start = prompt.index("# Reporting a new bug")
+    return prompt[start : prompt.index("# Safety rules", start)]
+
+
+def test_prompt_bug_section_extracts_and_asks_only_missing(config: VoiceAgentConfig) -> None:
+    section = _bug_section(config.prompt)
+    assert "from everything the user has already said" in section
+    assert "Write the short title yourself (5 to 200 characters)" in section
+    assert "Never ask the user for a title" in section
+    assert "The user's own words describing the problem are the description" in section
+    assert "Ask only for missing fields" in section
+    assert "all in one short question" in section
+    assert "call check_bug_report immediately" in section
+    assert "Do not read the fields back" in section
+    # The old literal slot-filling instruction caused redundant questions in live tests.
+    assert "one question at a time" not in config.prompt
+    assert "Collect four things" not in config.prompt
+
+
+def test_prompt_bug_section_maps_spoken_platforms_and_versions(config: VoiceAgentConfig) -> None:
+    section = _bug_section(config.prompt)
+    for phrase in (
+        '"PlayStation 5" or "PS5" is ps5',
+        '"Xbox" or "Xbox Series X" is xbox_series',
+        '"Switch" is switch',
+        '"PC" or "Steam" is pc',
+        '"one point four point two" is 1.4.2',
+    ):
+        assert phrase in section, phrase
+    # Every mapped target is a real Platform value.
+    targets = re.findall(r"\bis ([a-z0-9_]+)\b", section)
+    platform_values = {p.value for p in Platform}
+    assert {"ps5", "xbox_series", "switch", "pc"} <= set(targets) & platform_values
