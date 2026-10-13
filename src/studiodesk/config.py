@@ -10,8 +10,25 @@ from studiodesk import __version__
 
 GITHUB_REPO_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
+# ElevenLabs agent ids (e.g. `agent_01abc...`): kept URL-safe because they go in a query.
+ELEVENLABS_AGENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
+VOICE_LLM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
+# The sample values in `.env.example`. A `.env` copied without filling them in must behave
+# as "not configured" (never send a placeholder as a credential or call a fake host).
+# GITHUB_REPO=your-org/your-repo is not listed: an empty repo is a validation error, and
+# filing is off anyway while GITHUB_TOKEN is its placeholder.
+PLACEHOLDER_VALUES = frozenset(
+    {
+        "gsk_your-groq-key-here",
+        "sk-ant-your-key-here",
+        "https://your-cluster.cloud.qdrant.io:6333",
+        "your-qdrant-api-key",
+        "github_pat_your-token-here",
+        "your-elevenlabs-api-key",
+    }
+)
 DEFAULT_LLM_MODELS = {
     "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-sonnet-5-5",
@@ -130,9 +147,19 @@ class Settings(BaseSettings):
     slack_webhook_url: SecretStr | None = None
     slack_timeout_s: float = Field(default=10.0, gt=0, le=120)
 
-    # ElevenLabs voice agent
+    # ElevenLabs voice agent. Voice is enabled only when both key and agent id are set.
     elevenlabs_api_key: SecretStr | None = None
-    elevenlabs_agent_id: str | None = Field(default=None, max_length=128)
+    elevenlabs_agent_id: str | None = Field(default=None, pattern=ELEVENLABS_AGENT_ID_PATTERN)
+    elevenlabs_timeout_s: float = Field(default=10.0, gt=0, le=120)
+    # Per-client-IP limit for GET /voice/session (each call mints a signed session URL).
+    voice_rate_limit: str = Field(default="10/minute", pattern=RATE_LIMIT_PATTERN)
+    # Kill switch for GET /voice/session. Default: on in dev/test, OFF in prod unless set
+    # explicitly (see _voice_off_in_prod_by_default): each session costs ElevenLabs credits.
+    voice_enabled: bool = True
+    # Maximum voice sessions minted per UTC day (per process); beyond it 503 + Retry-After.
+    voice_max_sessions_per_day: int = Field(default=30, ge=1, le=100_000)
+    # LLM the ElevenLabs-hosted agent runs on; used only by scripts/setup_voice_agent.py.
+    voice_llm: str = Field(default="gemini-2.0-flash", pattern=VOICE_LLM_PATTERN)
 
     @property
     def resolved_llm_model(self) -> str:
@@ -173,6 +200,13 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _voice_off_in_prod_by_default(self) -> "Settings":
+        """Disable voice sessions in prod unless VOICE_ENABLED was set explicitly."""
+        if self.app_env == "prod" and "voice_enabled" not in self.model_fields_set:
+            object.__setattr__(self, "voice_enabled", False)
+        return self
+
+    @model_validator(mode="after")
     def _ordered_dup_thresholds(self) -> "Settings":
         """Require `dup_candidate_threshold <= dup_auto_threshold`."""
         if self.dup_candidate_threshold > self.dup_auto_threshold:
@@ -182,15 +216,23 @@ class Settings(BaseSettings):
     @field_validator(
         "groq_api_key",
         "anthropic_api_key",
+        "qdrant_url",
+        "qdrant_api_key",
         "github_token",
         "slack_webhook_url",
         "llm_model",
+        "elevenlabs_api_key",
+        "elevenlabs_agent_id",
         mode="before",
     )
     @classmethod
-    def _empty_integration_value_is_unset(cls, value: object) -> object:
-        """Treat an empty integration value (e.g. `SLACK_WEBHOOK_URL=`) as not configured."""
-        return None if isinstance(value, str) and not value.strip() else value
+    def _empty_or_placeholder_is_unset(cls, value: object) -> object:
+        """Treat an empty value (e.g. `SLACK_WEBHOOK_URL=`) or an unchanged `.env.example`
+        placeholder (e.g. `your-elevenlabs-api-key`) as not configured."""
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if isinstance(raw, str) and (not raw.strip() or raw.strip() in PLACEHOLDER_VALUES):
+            return None
+        return value
 
     @field_validator("slack_webhook_url")
     @classmethod
@@ -209,12 +251,6 @@ class Settings(BaseSettings):
         ):
             raise ValueError(f"slack_webhook_url must be an https://{SLACK_WEBHOOK_HOST}/ URL")
         return value
-
-    @field_validator("qdrant_url", mode="before")
-    @classmethod
-    def _empty_qdrant_url_is_unset(cls, value: object) -> object:
-        """Treat `QDRANT_URL=` (empty) as not configured."""
-        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("qdrant_url")
     @classmethod
