@@ -158,6 +158,9 @@ class Settings(BaseSettings):
     trusted_proxy_ips: Annotated[list[IPvAnyNetwork], NoDecode] = Field(
         default_factory=list, max_length=64
     )
+    # Log each request's peer IP and raw X-Forwarded-For at INFO (nothing else), to read a
+    # platform's proxy hops from its logs before setting trusted_proxy_ips. Off by default.
+    debug_log_client_ip: bool = False
 
     # GitHub Issues
     github_token: SecretStr | None = None

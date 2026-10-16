@@ -34,7 +34,11 @@ from studiodesk.embeddings import Embedder, SentenceTransformerEmbedder
 from studiodesk.llm import LLMClient, build_llm
 from studiodesk.llm.limits import LLMCallBudget, LLMConcurrencyGate
 from studiodesk.logging import configure_logging
-from studiodesk.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
+from studiodesk.middleware import (
+    BodySizeLimitMiddleware,
+    ClientIPDebugMiddleware,
+    SecurityHeadersMiddleware,
+)
 from studiodesk.vectorstore import QdrantStore, build_qdrant_client
 from studiodesk.voice import ElevenLabsClient, VoiceSessionQuota, build_http_client
 
@@ -224,6 +228,9 @@ def create_app(
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)
+    if resolved.debug_log_client_ip:
+        logger.warning("debug_log_client_ip is on: logging peer IPs and X-Forwarded-For")
+        app.add_middleware(ClientIPDebugMiddleware)
     # Added last, so it is the outermost: 413s from the body limit get the headers too.
     app.add_middleware(SecurityHeadersMiddleware, prod=is_prod)
     app.include_router(health.router)

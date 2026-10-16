@@ -1,13 +1,19 @@
-"""ASGI middleware enforcing a maximum request body size.
+"""ASGI middleware: request body size limit, security headers, client-IP debug log.
 
-Requests are rejected with 413 when the declared `Content-Length` exceeds the limit, and
-streamed (chunked) bodies are cut off as soon as the running total passes it, so an
-oversized body is never fully buffered.
+`BodySizeLimitMiddleware`: requests are rejected with 413 when the declared
+`Content-Length` exceeds the limit, and streamed (chunked) bodies are cut off as soon as
+the running total passes it, so an oversized body is never fully buffered.
+`SecurityHeadersMiddleware` adds baseline headers to every response;
+`ClientIPDebugMiddleware` (opt-in) logs the peer and X-Forwarded-For only.
 """
+
+import logging
 
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+logger = logging.getLogger(__name__)
 
 TOO_LARGE_DETAIL = "Request body too large"
 BAD_LENGTH_DETAIL = "Invalid Content-Length header"
@@ -130,3 +136,37 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+
+FORWARDED_FOR = b"x-forwarded-for"
+MAX_LOGGED_FORWARDED_CHARS = 512
+
+
+class ClientIPDebugMiddleware:
+    """Log the direct peer and the raw X-Forwarded-For of each HTTP request at INFO.
+
+    Only for working out a platform's proxy hops (to set TRUSTED_PROXY_IPS); enabled by
+    DEBUG_LOG_CLIENT_IP. No other header, path or body is logged.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap `app`."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Log the peer host and X-Forwarded-For once, then pass the request through."""
+        if scope["type"] == "http":
+            client = scope.get("client")
+            forwarded = ", ".join(
+                value.decode("latin-1")
+                for name, value in scope.get("headers", [])
+                if name == FORWARDED_FOR
+            )
+            logger.info(
+                "client ip debug",
+                extra={
+                    "peer": client[0] if client else None,
+                    "x_forwarded_for": forwarded[:MAX_LOGGED_FORWARDED_CHARS] or None,
+                },
+            )
+        await self.app(scope, receive, send)

@@ -313,8 +313,36 @@ def _validated(name: str, value: str, pattern: str) -> str:
     return value
 
 
-def _proxy_list(trusted_proxies: Sequence[str]) -> str:
-    """Validate IPs/CIDRs and join them for TRUSTED_PROXY_IPS (no catch-all networks)."""
+# Address ranges a platform's internal proxy can legitimately use. A public network as a
+# trusted proxy would let anyone in it set X-Forwarded-For (needs --force-public-proxy).
+PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "fc00::/7",
+        "::1/128",
+    )
+)
+
+
+def is_private_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+    """True if `network` lies entirely inside one of PRIVATE_NETWORKS."""
+    return any(
+        network.version == private.version and network.subnet_of(private)  # type: ignore[arg-type]
+        for private in PRIVATE_NETWORKS
+    )
+
+
+def _proxy_list(trusted_proxies: Sequence[str], *, allow_public: bool = False) -> str:
+    """Validate IPs/CIDRs and join them for TRUSTED_PROXY_IPS.
+
+    Catch-all networks are always rejected; public (non-private) ones unless
+    `allow_public`.
+    """
     networks = []
     for item in (p.strip() for raw in trusted_proxies for p in raw.split(",")):
         if not item:
@@ -325,23 +353,36 @@ def _proxy_list(trusted_proxies: Sequence[str]) -> str:
             raise ConfigError(f"--trusted-proxy is not an IP or CIDR: {item}") from None
         if network.prefixlen == 0:
             raise ConfigError("--trusted-proxy must not trust every address")
+        if not allow_public and not is_private_network(network):
+            raise ConfigError(
+                f"--trusted-proxy {network} is not a private network "
+                "(pass --force-public-proxy if you are sure)"
+            )
         networks.append(str(network))
     return ",".join(networks)
 
 
-def space_settings(dotenv: Mapping[str, str], trusted_proxies: Sequence[str]) -> SpaceSettings:
+def space_settings(
+    dotenv: Mapping[str, str],
+    trusted_proxies: Sequence[str],
+    *,
+    allow_public_proxy: bool = False,
+    debug_client_ip: bool = False,
+) -> SpaceSettings:
     """Variables and secrets for the Space, from fixed values and `.env` only."""
     provider = dotenv.get("LLM_PROVIDER", "").strip() or "groq"
     if provider not in LLM_PROVIDERS:
         raise ConfigError("LLM_PROVIDER in .env must be groq or anthropic")
     variables = dict(FIXED_VARIABLES)
     variables["LLM_PROVIDER"] = provider
+    # Always written, so a later sync without --debug-client-ip turns the log off again.
+    variables["DEBUG_LOG_CLIENT_IP"] = "true" if debug_client_ip else "false"
     collection = dotenv.get("QDRANT_COLLECTION", "").strip() or DEFAULT_COLLECTION
     variables["QDRANT_COLLECTION"] = _validated("QDRANT_COLLECTION", collection, COLLECTION_PATTERN)
     repo = dotenv.get("GITHUB_REPO", "").strip()
     if repo:
         variables["GITHUB_REPO"] = _validated("GITHUB_REPO", repo, GITHUB_REPO_PATTERN)
-    proxies = _proxy_list(trusted_proxies)
+    proxies = _proxy_list(trusted_proxies, allow_public=allow_public_proxy)
     if proxies:
         variables["TRUSTED_PROXY_IPS"] = proxies
 
@@ -408,6 +449,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="CIDR",
         help="proxy IP/CIDR for TRUSTED_PROXY_IPS (repeatable; with --sync-settings)",
     )
+    parser.add_argument(
+        "--force-public-proxy",
+        action="store_true",
+        help="allow a non-private network in --trusted-proxy",
+    )
+    parser.add_argument(
+        "--debug-client-ip",
+        action="store_true",
+        help="set DEBUG_LOG_CLIENT_IP=true (log peer IP + X-Forwarded-For to find proxy hops)",
+    )
     parser.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     parser.add_argument(
         "--env-file", type=Path, default=DEFAULT_ENV_FILE, help="local .env to read"
@@ -434,9 +485,18 @@ def run(
     """Execute the deploy described by `args`; returns the exit code."""
     dotenv = read_dotenv(args.env_file)
     readme = space_readme(resolve_source_repo_url(dotenv))
-    settings = space_settings(dotenv, args.trusted_proxy) if args.sync_settings else None
-    if args.trusted_proxy and not args.sync_settings:
-        raise ConfigError("--trusted-proxy needs --sync-settings")
+    if (args.trusted_proxy or args.debug_client_ip) and not args.sync_settings:
+        raise ConfigError("--trusted-proxy and --debug-client-ip need --sync-settings")
+    settings = (
+        space_settings(
+            dotenv,
+            args.trusted_proxy,
+            allow_public_proxy=args.force_public_proxy,
+            debug_client_ip=args.debug_client_ip,
+        )
+        if args.sync_settings
+        else None
+    )
     space = validate_space_id(args.space) if args.space else None
 
     with tempfile.TemporaryDirectory(prefix="studiodesk-space-") as tmp:
