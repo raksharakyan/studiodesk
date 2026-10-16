@@ -2,8 +2,11 @@
 
 import logging
 import math
+from collections.abc import Sequence
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from studiodesk.actions.proposals import (
     ProposalCapacityError,
@@ -65,3 +68,31 @@ def proposal_http_error(exc: ProposalError) -> HTTPException:
         logger.warning("proposal store full")
         return HTTPException(status_code=503, detail=ACTIONS_UNAVAILABLE_DETAIL)
     return HTTPException(status_code=404, detail=ACTION_NOT_FOUND_DETAIL)
+
+
+VALIDATION_ERROR_MSG = "Invalid value"
+# Keys of unexpected fields are user-chosen; keep the echoed part of `loc` short.
+MAX_LOC_PART_CHARS = 64
+
+
+def _safe_loc(loc: Sequence[object]) -> list[str | int]:
+    """Error location with ints kept and every other part as a truncated string."""
+    return [part if isinstance(part, int) else str(part)[:MAX_LOC_PART_CHARS] for part in loc]
+
+
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """422 listing only each error's `loc`, `type` and a fixed `msg`.
+
+    Pydantic's `input`, `ctx` and `msg` can echo request values back (M2 #8), so none of
+    them is returned or logged.
+    """
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    detail = [
+        {
+            "loc": _safe_loc(error.get("loc", ())),
+            "type": str(error.get("type", "value_error")),
+            "msg": VALIDATION_ERROR_MSG,
+        }
+        for error in errors
+    ]
+    return JSONResponse({"detail": detail}, status_code=422)

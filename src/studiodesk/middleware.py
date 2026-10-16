@@ -90,3 +90,43 @@ async def _reject(scope: Scope, receive: Receive, send: Send, status: int, detai
     """Send a JSON error response in FastAPI's `{"detail": ...}` shape."""
     response = JSONResponse({"detail": detail}, status_code=status)
     await response(scope, receive, send)
+
+
+BASELINE_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+)
+# Only in prod, where the app is served over HTTPS by the platform's edge proxy.
+PROD_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+    (b"cross-origin-opener-policy", b"same-origin"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """Add baseline security headers to every HTTP response (and HSTS/COOP in prod).
+
+    A header the route already set (e.g. the pages' own policy) is left unchanged, so
+    page-specific values win over these defaults.
+    """
+
+    def __init__(self, app: ASGIApp, *, prod: bool) -> None:
+        """Wrap `app`; with `prod`, also send HSTS and Cross-Origin-Opener-Policy."""
+        self.app = app
+        self.headers = BASELINE_HEADERS + (PROD_HEADERS if prod else ())
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request through, adding missing headers to `http.response.start`."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {name.lower() for name, _ in headers}
+                headers += [(n, v) for n, v in self.headers if n not in present]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
