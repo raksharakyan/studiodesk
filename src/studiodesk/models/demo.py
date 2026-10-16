@@ -22,6 +22,14 @@ class FeatureStatus(BaseModel):
     remaining_today: int = Field(ge=0)
 
 
+class LLMStatus(BaseModel):
+    """What is left today of the process-wide LLM call budget."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    remaining_today: int = Field(ge=0)
+
+
 class DemoInfo(BaseModel):
     """Body returned by `GET /api/demo-info`."""
 
@@ -33,3 +41,4 @@ class DemoInfo(BaseModel):
     sandbox_issues_url: str | None
     actions: FeatureStatus
     voice: FeatureStatus
+    llm: LLMStatus

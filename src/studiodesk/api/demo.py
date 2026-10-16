@@ -1,7 +1,8 @@
 """`GET /api/demo-info`: what the public demo can do right now, for the main page.
 
 Read-only: it reports the kill switches, whether each feature is configured, and the
-daily caps with what is left today (from the proposal store and the voice quota). It
+daily caps with what is left today (from the proposal store, the voice quota and the
+LLM call budget). It
 never reserves a slot and never returns a secret, agent id or signed URL. Responses are
 `Cache-Control: no-store` because the remaining counts change with every filed issue or
 started voice session.
@@ -16,7 +17,8 @@ from studiodesk.actions.github import GitHubIssues
 from studiodesk.actions.proposals import ProposalStore
 from studiodesk.api.deps import get_optional_github, get_settings
 from studiodesk.config import Settings
-from studiodesk.models.demo import DemoInfo, FeatureStatus
+from studiodesk.llm.limits import LLMCallBudget
+from studiodesk.models.demo import DemoInfo, FeatureStatus, LLMStatus
 from studiodesk.voice import VoiceSessionQuota
 
 GITHUB_BASE_URL = "https://github.com"
@@ -60,6 +62,7 @@ def build_demo_info(
     proposals: ProposalStore | None,
     voice_configured: bool,
     voice_quota: VoiceSessionQuota | None,
+    llm_budget: LLMCallBudget | None = None,
 ) -> DemoInfo:
     """Assemble the public demo facts from settings and the startup collaborators."""
     repo = settings.github_repo
@@ -69,6 +72,11 @@ def build_demo_info(
         sandbox_issues_url=sandbox_issues_url(repo),
         actions=actions_status(settings, github, proposals),
         voice=voice_status(settings, voice_configured, voice_quota),
+        llm=LLMStatus(
+            remaining_today=llm_budget.remaining_today()
+            if llm_budget is not None
+            else settings.llm_max_calls_per_day
+        ),
     )
 
 
@@ -96,6 +104,7 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
             getattr(state, "proposals", None),
             voice_configured,
             getattr(state, "voice_quota", None),
+            getattr(state, "llm_budget", None),
         )
 
     return router

@@ -114,6 +114,7 @@ def test_demo_info_shape_and_no_secrets(store: QdrantStore, fake_embedder: Embed
         "sandbox_issues_url": f"https://github.com/{FAKE_REPO}/issues",
         "actions": {"enabled": True, "configured": True, "max_per_day": 5, "remaining_today": 5},
         "voice": {"enabled": True, "configured": True, "max_per_day": 3, "remaining_today": 3},
+        "llm": {"remaining_today": 300},
     }
     for secret in ("xi-secret", "test-token-not-real", "agent_secret123"):
         assert secret not in response.text
