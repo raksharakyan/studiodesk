@@ -2,6 +2,8 @@
 never the real `.env`). The full suite is written by qa-agent."""
 
 import importlib.util
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +66,16 @@ def fake_repo(tmp_path: Path) -> Path:
     (root / ".env").write_text("NEVER=staged\n")
     (root / "tests").mkdir()
     (root / "tests" / "t.py").write_text("")
+    track(root)
     return root
+
+
+def track(root: Path) -> None:
+    """Make `root` a git checkout with every file tracked (the script stages git files)."""
+    git = shutil.which("git")
+    assert git is not None, "git is required for the deploy script tests"
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run([git, "-C", str(root), *args], check=True, capture_output=True)  # noqa: S603
 
 
 def write_env(tmp_path: Path, extra: str = "") -> Path:
@@ -101,6 +112,7 @@ def test_dry_run_needs_no_token_and_stages_only_the_allowlist(
 def test_secret_in_staged_file_fails_closed(deploy: ModuleType, tmp_path: Path) -> None:
     root = fake_repo(tmp_path)
     (root / "src" / "pkg" / "leak.py").write_text(f'KEY = "{FAKE_GROQ}"\n')
+    track(root)
     args = deploy.parse_args(["--dry-run", "--env-file", str(write_env(tmp_path))])
     with pytest.raises(deploy.ConfigError, match="leak.py"):
         deploy.run(args, environ={}, repo_root=root)
@@ -109,6 +121,7 @@ def test_secret_in_staged_file_fails_closed(deploy: ModuleType, tmp_path: Path) 
 def test_env_file_inside_staged_dir_fails_closed(deploy: ModuleType, tmp_path: Path) -> None:
     root = fake_repo(tmp_path)
     (root / "src" / ".env.local").write_text("X=1\n")
+    track(root)
     args = deploy.parse_args(["--dry-run", "--env-file", str(tmp_path / "none.env")])
     with pytest.raises(deploy.ConfigError, match=r"\.env file"):
         deploy.run(args, environ={}, repo_root=root)
@@ -161,3 +174,21 @@ def test_dry_run_on_the_real_repo_lists_no_secrets(
     listed = [line.strip() for line in capsys.readouterr().out.splitlines()]
     assert "Dockerfile" in listed and "uv.lock" in listed
     assert not any(line.startswith((".env", "tests/", "scripts/", ".git")) for line in listed)
+
+
+def test_untracked_file_under_src_aborts_with_its_path(deploy: ModuleType, tmp_path: Path) -> None:
+    root = fake_repo(tmp_path)
+    (root / "src" / "pkg" / "notes.txt").write_text("draft\n")
+    args = deploy.parse_args(["--dry-run", "--env-file", str(tmp_path / "none.env")])
+    with pytest.raises(deploy.ConfigError, match="src/pkg/notes.txt"):
+        deploy.run(args, environ={}, repo_root=root)
+
+
+def test_token_shapes_and_encoded_secrets_are_caught(deploy: ModuleType) -> None:
+    import base64
+
+    assert deploy.scan_bytes(b"x = 'ghp_" + b"a" * 36 + b"'", []) is not None
+    assert deploy.scan_bytes(b"https://hooks.slack.com/services/T/B/x", []) is not None
+    assert deploy.scan_bytes(b"gsk_your-groq-key-here", []) is None  # placeholder
+    needles = sorted(deploy.encoded_forms(FAKE_GROQ))
+    assert deploy.scan_bytes(base64.b64encode(FAKE_GROQ.encode()), needles) is not None

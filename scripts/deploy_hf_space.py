@@ -1,10 +1,12 @@
 """Deploy StudioDesk to a public Hugging Face Docker Space (idempotent).
 
 Builds a staging directory in a temporary folder from an explicit allowlist (Dockerfile,
-.dockerignore, pyproject.toml, uv.lock, src/ and data/ without caches, plus a generated
-Space README with the YAML front matter HF needs), refuses to continue if any staged file
-is named `.env*`, is a symlink, or contains the value of a secret from `.env`, then mirrors
-it to the Space with `upload_folder`.
+.dockerignore, pyproject.toml, uv.lock, the git-tracked files under src/ and data/, plus a
+generated Space README with the YAML front matter HF needs). It aborts if src/ or data/
+hold untracked or ignored files (other than caches), or if any staged file is named
+`.env*`, is a symlink, contains a token-shaped string (GitHub, Groq, Anthropic, HF,
+ElevenLabs, Slack) or a secret value from `.env` in raw, base64, URL- or JSON-encoded
+form. Then it mirrors the staging folder to the Space with `upload_folder`.
 
 `--sync-settings` also sets the Space's non-secret *variables* (prod switches and caps)
 and its *secrets* from a fixed allowlist read only from `.env` (never from the shell
@@ -22,12 +24,16 @@ Exit codes: 0 ok, 1 Hugging Face API error, 2 configuration error, 3 aborted.
 """
 
 import argparse
+import base64
 import ipaddress
+import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +91,20 @@ SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|WEBHOOK)", re.IGNORECAS
 MIN_SCANNED_SECRET_CHARS = 8
 SPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 _DOTENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_QUOTED_VALUE_RE = re.compile(r"""^(['"])(.*)\1(?:\s+#.*)?$""")
+_INLINE_COMMENT_RE = re.compile(r"\s+#")
+# Well-known credential shapes; any match in a staged file aborts the deploy.
+TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
+    ("GitHub token", re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}")),
+    ("GitHub fine-grained token", re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{22,}")),
+    ("Groq key", re.compile(rb"\bgsk_[A-Za-z0-9]{20,}")),
+    ("Anthropic key", re.compile(rb"\bsk-ant-[A-Za-z0-9_-]{20,}")),
+    ("Hugging Face token", re.compile(rb"\bhf_[A-Za-z0-9]{30,}")),
+    ("ElevenLabs key", re.compile(rb"\bsk_[0-9a-f]{32,}")),
+    ("Slack token", re.compile(rb"\bxox[abp]-[A-Za-z0-9-]{10,}")),
+    ("Slack webhook", re.compile(rb"hooks\.slack\.com/services/")),
+)
 
 README_TEMPLATE = """---
 title: StudioDesk
@@ -164,12 +184,23 @@ class SpaceSettings:
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
-    """Parse a `.env` file (KEY=VALUE, optional quotes, `export`, # comments).
+    """Parse a `.env` file the way pydantic-settings does (python-dotenv), else locally.
 
-    A missing file yields an empty dict. Values are returned, never printed.
+    No `${VAR}` interpolation (the shell environment must not leak in). A missing file
+    yields an empty dict. Values are returned, never printed.
     """
     if not path.is_file():
         return {}
+    try:
+        from dotenv import dotenv_values
+    except ImportError:  # pragma: no cover - python-dotenv ships with pydantic-settings
+        return _parse_dotenv(path)
+    parsed = dotenv_values(path, interpolate=False, encoding="utf-8")
+    return {k: v or "" for k, v in parsed.items() if k and _ENV_NAME_RE.fullmatch(k)}
+
+
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    """Fallback `.env` parser: KEY=VALUE, `export`, quotes and inline `# comments`."""
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
@@ -178,10 +209,11 @@ def read_dotenv(path: Path) -> dict[str, str]:
         if match is None:
             continue
         key, value = match.groups()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        elif " #" in value:
-            value = value.split(" #", 1)[0].rstrip()
+        quoted = _QUOTED_VALUE_RE.match(value)
+        if quoted is not None:
+            value = quoted.group(2)
+        else:
+            value = _INLINE_COMMENT_RE.split(value, maxsplit=1)[0].rstrip()
         values[key] = value
     return values
 
@@ -243,33 +275,62 @@ def _skipped(path: Path) -> bool:
     )
 
 
-def _copy_tree(source: Path, target: Path) -> None:
-    """Copy regular files under `source`, skipping caches; refuse symlinks."""
-    for path in sorted(source.rglob("*")):
-        relative = path.relative_to(source)
-        if any(_skipped(Path(part)) for part in relative.parts):
-            continue
-        if path.is_symlink():
-            raise ConfigError(f"refusing to stage a symlink: {source.name}/{relative}")
-        if path.is_dir():
-            continue
-        destination = target / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, destination)
+def _is_cache_path(relative: str) -> bool:
+    """True for caches, bytecode and OS litter (never staged, never reported)."""
+    return any(_skipped(Path(part)) for part in Path(relative).parts)
+
+
+def _git_ls_files(repo_root: Path, *options: str) -> list[str]:
+    """`git ls-files -z <options> -- src data` in `repo_root`, as relative POSIX paths."""
+    git = shutil.which("git")
+    if git is None:
+        raise ConfigError("git is required: only files tracked by git are staged")
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed binary and arguments
+            [git, "-C", str(repo_root), "ls-files", "-z", *options, "--", *STAGED_DIRS],
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ConfigError("git ls-files failed: run the deploy from a git checkout") from None
+    return [p for p in result.stdout.decode("utf-8").split("\0") if p]
+
+
+def tracked_files(repo_root: Path) -> list[str]:
+    """Git-tracked files under src/ and data/ (caches excluded).
+
+    Raises:
+        ConfigError: listing any untracked or ignored non-cache files under src/ or data/
+            (commit or delete them first), so nothing unreviewed is ever uploaded.
+    """
+    stray = [p for p in _git_ls_files(repo_root, "--others") if not _is_cache_path(p)]
+    if stray:
+        raise ConfigError(
+            "untracked or ignored files under src/ or data/ (commit or remove them): "
+            + ", ".join(sorted(stray))
+        )
+    return sorted(p for p in _git_ls_files(repo_root) if not _is_cache_path(p))
+
+
+def _copy_file(repo_root: Path, relative: str, staging: Path) -> None:
+    """Copy one regular file into `staging`, refusing symlinks and missing files."""
+    source = repo_root / relative
+    if source.is_symlink():
+        raise ConfigError(f"refusing to stage a symlink: {relative}")
+    if not source.is_file():
+        raise ConfigError(f"missing, deleted or not a regular file: {relative}")
+    destination = staging / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
 
 
 def build_staging(repo_root: Path, staging: Path, readme: str) -> None:
-    """Fill `staging` with exactly the allowlisted files and the generated README."""
+    """Fill `staging` with the allowlisted files, git-tracked src/ and data/, and README."""
     for name in STAGED_FILES:
-        source = repo_root / name
-        if not source.is_file() or source.is_symlink():
-            raise ConfigError(f"missing or not a regular file: {name}")
-        shutil.copyfile(source, staging / name)
-    for name in STAGED_DIRS:
-        source = repo_root / name
-        if not source.is_dir() or source.is_symlink():
-            raise ConfigError(f"missing directory: {name}")
-        _copy_tree(source, staging / name)
+        _copy_file(repo_root, name, staging)
+    for relative in tracked_files(repo_root):
+        _copy_file(repo_root, relative, staging)
     (staging / "README.md").write_text(readme, encoding="utf-8")
 
 
@@ -288,12 +349,39 @@ def secret_values(dotenv: Mapping[str, str], environ: Mapping[str, str]) -> list
     return sorted(v for v in values if is_set(v) and len(v) >= MIN_SCANNED_SECRET_CHARS)
 
 
-def check_staging(staging: Path, secrets: Sequence[str]) -> None:
-    """Fail closed if any staged path is `.env*`, a symlink, or contains a secret value.
+def encoded_forms(secret: str) -> set[bytes]:
+    """The secret raw and as base64 (standard and URL-safe, unpadded), URL-encoded and
+    JSON-escaped, so a staged copy in any of those forms is caught too."""
+    raw = secret.encode("utf-8")
+    return {
+        raw,
+        base64.b64encode(raw).rstrip(b"="),
+        base64.urlsafe_b64encode(raw).rstrip(b"="),
+        urllib.parse.quote(secret, safe="").encode("ascii"),
+        json.dumps(secret)[1:-1].encode("utf-8"),
+    }
 
-    Error messages name the file, never the secret.
+
+def scan_bytes(data: bytes, needles: Sequence[bytes]) -> str | None:
+    """Why `data` must not be uploaded (a known token shape or a secret value), or None.
+
+    The reason names the kind of match only, never the matched text.
     """
-    encoded = [s.encode("utf-8") for s in secrets]
+    for name, pattern in TOKEN_PATTERNS:
+        if pattern.search(data):
+            return f"looks like a {name}"
+    if any(needle in data for needle in needles):
+        return "contains a secret value from .env (raw or encoded)"
+    return None
+
+
+def check_staging(staging: Path, secrets: Sequence[str]) -> None:
+    """Fail closed if any staged path is `.env*`, a symlink, contains a token-shaped
+    string, or contains a secret value in raw, base64, URL- or JSON-encoded form.
+
+    Error messages name the file and the kind of match, never the secret.
+    """
+    needles = sorted({form for secret in secrets for form in encoded_forms(secret)})
     for path in sorted(staging.rglob("*")):
         relative = path.relative_to(staging).as_posix()
         if path.is_symlink():
@@ -301,9 +389,9 @@ def check_staging(staging: Path, secrets: Sequence[str]) -> None:
         if path.name.startswith(FORBIDDEN_NAME_PREFIX):
             raise ConfigError(f".env file in staging: {relative}")
         if path.is_file():
-            data = path.read_bytes()
-            if any(secret in data for secret in encoded):
-                raise ConfigError(f"a secret value from .env appears in {relative}")
+            reason = scan_bytes(path.read_bytes(), needles)
+            if reason is not None:
+                raise ConfigError(f"{relative} {reason}")
 
 
 def _validated(name: str, value: str, pattern: str) -> str:
