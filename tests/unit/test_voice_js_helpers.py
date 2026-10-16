@@ -86,6 +86,17 @@ RUNNERS = {
             'onDisconnect({reason: "error"}) never restarts the session',
         ],
     },
+    "home.test.mjs": {
+        "min_tests": 12,
+        "required": [
+            "limitText renders counts, used-up, disabled and not-configured states",
+            "projectLinks accepts only https://github.com/owner/repo",
+            "sandboxLink needs a well-formed repo and its matching issues URL",
+            "the injection report is shown as inert text in the preview and never auto-confirmed",
+            "confirming refreshes the limits through the usage event",
+            "hostile demo-info values never become links or markup",
+        ],
+    },
     "voice_preview.test.mjs": {
         "min_tests": 30,
         "required": [
@@ -111,10 +122,16 @@ RUNNERS = {
 RunResult = tuple[int, list[dict[str, Any]], str]
 
 
+HOME_JS = STATIC_DIR / "home.js"
+# Each runner's module under test (default voice.js).
+RUNNER_TARGETS = {"home.test.mjs": HOME_JS}
+
+
 def _run(runner: str) -> RunResult:
     assert NODE is not None
+    target = RUNNER_TARGETS.get(runner, VOICE_JS)
     proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
-        [NODE, str(JS_DIR / runner), str(VOICE_JS)],
+        [NODE, str(JS_DIR / runner), str(target)],
         capture_output=True,
         text=True,
         timeout=60,
