@@ -3,6 +3,12 @@
 Nothing outward happens here. When the verdict is not `duplicate` and GitHub is
 configured, the exact issue is stored server-side and returned as a preview with a
 single-use `confirm_token`; filing needs `POST /actions/{action_id}/confirm`.
+
+"File anyway": a `duplicate` verdict proposes nothing unless the request sets
+`file_anyway: true`; the issue is then proposed like a possible duplicate (label
+`possible-duplicate` and the server-written "Possible duplicates: ..." line with canonical
+ids). Duplicate responses say `file_anyway_available: true` when filing is enabled and
+configured.
 """
 
 import logging
@@ -35,6 +41,7 @@ from studiodesk.config import Settings
 from studiodesk.llm import LLMClient, LLMError
 from studiodesk.models.actions import ProposedAction
 from studiodesk.models.bugs import (
+    BugCheckRequest,
     BugCheckResponse,
     DuplicateCheck,
     DuplicateVerdict,
@@ -93,14 +100,15 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
     @limiter.limit(rate_limit)
     def check_bug(
         request: Request,
-        body: NewBugReport,
+        body: BugCheckRequest,
         retriever: Annotated[Retriever, Depends(get_retriever)],
         llm: Annotated[LLMClient, Depends(get_llm)],
         proposals: Annotated[ProposalStore, Depends(get_proposal_store)],
         github: Annotated[GitHubIssues | None, Depends(get_optional_github)],
         settings: Annotated[Settings, Depends(get_settings)],
     ) -> BugCheckResponse:
-        """Check `body` for duplicates, route it, and propose filing it unless duplicate."""
+        """Check `body` for duplicates, route it, and propose filing it unless duplicate
+        (or when the user asked to file a duplicate anyway)."""
         try:
             routing = route_bug(body, retriever, k=settings.routing_k)
             duplicates: DuplicateCheck = check_duplicates(
@@ -115,8 +123,9 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
             raise vector_store_http_error() from None
         except LLMError as exc:
             raise llm_http_error(exc) from None
+        is_duplicate = duplicates.verdict is DuplicateVerdict.DUPLICATE
         proposed = None
-        if duplicates.verdict is not DuplicateVerdict.DUPLICATE and github is not None:
+        if (not is_duplicate or body.file_anyway) and github is not None:
             try:
                 proposed = propose_issue(
                     body,
@@ -134,6 +143,7 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
                 "verdict": duplicates.verdict.value,
                 "candidates": len(duplicates.candidates),
                 "proposed": proposed is not None,
+                "file_anyway": body.file_anyway,
             },
         )
         return BugCheckResponse(
@@ -143,6 +153,7 @@ def build_router(limiter: Limiter, rate_limit: str) -> APIRouter:
             candidates=duplicates.candidates,
             routing=routing,
             proposed_action=proposed,
+            file_anyway_available=is_duplicate and settings.actions_enabled and github is not None,
         )
 
     return router

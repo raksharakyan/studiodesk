@@ -579,6 +579,321 @@ details.typed-bug[open] summary {
   margin-bottom: 0.5rem;
 }
 
+/* ---------------------------------------------------------------------------------------
+   Main page (index.html)
+   --------------------------------------------------------------------------------------- */
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hero h1 {
+  font-size: clamp(1.5rem, 1.1rem + 2vw, 2.25rem);
+}
+
+.hero .title-sub {
+  font-weight: 600;
+}
+
+.lead {
+  font-size: 1.075rem;
+  max-width: 48rem;
+}
+
+.demo-note {
+  max-width: 48rem;
+  border-left: 4px solid var(--note-text);
+}
+
+.link-row {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+}
+
+.link-row a {
+  display: inline-block;
+  padding: 0.35rem 0;
+  font-weight: 600;
+}
+
+.home-main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.home-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  min-width: 0;
+}
+
+@media (min-width: 56rem) {
+  .home-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* "Try these" chips: real buttons, wrapped onto as many lines as needed. */
+.chips {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.chips-bugs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+@media (min-width: 48rem) {
+  .chips-bugs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.chips li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chip {
+  min-height: 2.75rem;
+  max-width: 100%;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  color: var(--secondary-text);
+  background: var(--surface-alt);
+  border: 2px solid var(--control-border);
+  border-radius: 1.5rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.chip:hover {
+  border-color: var(--primary);
+  background: var(--user-bubble);
+}
+
+.chip-alt {
+  border-style: dashed;
+}
+
+.chip-note {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.chip-caption {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.925rem;
+}
+
+.ai-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  color: var(--muted);
+  border: 1px solid var(--control-border);
+  border-radius: 0.25rem;
+}
+
+.file-anyway {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.75rem;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.file-anyway .hint {
+  margin-bottom: 0.5rem;
+}
+
+.limits {
+  margin: 0 0 0.5rem;
+  padding-left: 1.25rem;
+  font-weight: 600;
+}
+
+.say-list {
+  margin: 0 0 0.75rem;
+  padding-left: 1.25rem;
+}
+
+.say-list li + li {
+  margin-top: 0.35rem;
+}
+
+/* "How it works": an HTML flow diagram. Stacks on phones, runs left to right when wide. */
+.flow-figure {
+  margin: 0 0 1rem;
+}
+
+.flow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+.flow li {
+  position: relative;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-alt);
+  border: 2px solid var(--control-border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.flow li strong,
+.flow li span {
+  display: block;
+}
+
+.flow li span {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* Arrows between steps: decorative, so drawn by CSS (not read by screen readers). */
+.flow li + li::before {
+  content: "";
+  position: absolute;
+  left: 1.5rem;
+  top: -1.4rem;
+  width: 0;
+  height: 0;
+  border-left: 0.5rem solid transparent;
+  border-right: 0.5rem solid transparent;
+  border-top: 0.9rem solid var(--control-border);
+}
+
+.flow-branches {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.flow-branch {
+  padding: 0.75rem;
+  border: 1px dashed var(--control-border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.flow-branch-title {
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+@media (min-width: 56rem) {
+  .flow {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-template-columns: none;
+    gap: 1.5rem;
+  }
+
+  .flow li + li::before {
+    left: -1.3rem;
+    top: 50%;
+    margin-top: -0.5rem;
+    border-top: 0.5rem solid transparent;
+    border-bottom: 0.5rem solid transparent;
+    border-left: 0.9rem solid var(--control-border);
+    border-right: 0;
+  }
+
+  .flow-branches {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  }
+}
+
+.scores {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+  margin: 0;
+}
+
+@media (min-width: 36rem) {
+  .scores {
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  }
+}
+
+.scores > div {
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.scores dt {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.scores dd {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.scores .score-weak {
+  border-left: 4px solid var(--note-text);
+}
+
+.scores .score-weak .meta {
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+#voice,
+#ask,
+#bug-panel,
+#issues-info,
+#how {
+  scroll-margin-top: 0.75rem;
+}
+
+.page-links {
+  margin-top: 0.25rem;
+}
+
 [hidden] {
   display: none !important;
 }

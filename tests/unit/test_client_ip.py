@@ -48,13 +48,13 @@ def _resolve(peer: str | None, xff: Sequence[str], trusted: Sequence[object]) ->
         ("10.0.0.1", ["198.51.100.1:443"], V4_PROXIES, "10.0.0.1"),
         # Whitespace is tolerated.
         ("10.0.0.1", ["  198.51.100.1  "], V4_PROXIES, "198.51.100.1"),
-        # IPv6, normalised.
-        ("fd00::1", ["2001:DB8::0001"], V6_PROXIES, "2001:db8::1"),
-        ("fd00::1", ["2001:db8::1, fd12::7"], V6_PROXIES, "2001:db8::1"),
+        # IPv6, keyed by its /64 prefix.
+        ("fd00::1", ["2001:DB8::0001"], V6_PROXIES, "2001:db8::/64"),
+        ("fd00::1", ["2001:db8::1, fd12::7"], V6_PROXIES, "2001:db8::/64"),
         # Mixed v4/v6: v4 trust does not cover a v6 peer, and vice versa.
-        ("fd00::1", ["198.51.100.1"], V4_PROXIES, "fd00::1"),
+        ("fd00::1", ["198.51.100.1"], V4_PROXIES, "fd00::/64"),
         ("10.0.0.1", ["198.51.100.1"], V6_PROXIES, "10.0.0.1"),
-        ("10.0.0.1", ["2001:db8::1, fd00::2"], MIXED, "2001:db8::1"),
+        ("10.0.0.1", ["2001:db8::1, fd00::2"], MIXED, "2001:db8::/64"),
         ("fd00::1", ["198.51.100.1, 10.9.9.9"], MIXED, "198.51.100.1"),
         # Non-IP peer (e.g. a unix socket / TestClient name) is used as-is.
         ("testclient", ["198.51.100.1"], V4_PROXIES, "testclient"),

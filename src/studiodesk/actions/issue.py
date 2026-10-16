@@ -1,9 +1,10 @@
 """Build the GitHub issue for a submitted report, server-side, from fixed fields only.
 
 The issue text comes only from the user's validated report fields, the kNN routing result
-and, for a `possible_duplicate` verdict, the ids and similarity scores of the flagged
-candidates from our own retrieval. No model text (answers, reasons) is ever included, so
-the LLM cannot put content into an outward action.
+and, for a `possible_duplicate` verdict (or a `duplicate` the user chose to file anyway),
+the ids and similarity scores of the flagged candidates from our own retrieval. No model
+text (answers, reasons) is ever included, so the LLM cannot put content into an outward
+action.
 
 User-supplied fields go inside code fences longer than any backtick run they contain, so
 markdown, HTML comments, `#refs` and URLs render inertly. The title stays plain text with
@@ -71,9 +72,14 @@ def _routing_lines(routing: RoutingResult) -> list[str]:
     return lines
 
 
+# Verdicts whose issue is labelled `possible-duplicate` and lists the flagged reports. A
+# `duplicate` draft is only built when the user asked to file it anyway.
+FLAGGED_VERDICTS = frozenset({DuplicateVerdict.POSSIBLE_DUPLICATE, DuplicateVerdict.DUPLICATE})
+
+
 def flagged_candidates(duplicates: DuplicateCheck) -> list[DuplicateCandidate]:
-    """Candidates behind a `possible_duplicate` verdict, best score first (bug ids only)."""
-    if duplicates.verdict is not DuplicateVerdict.POSSIBLE_DUPLICATE:
+    """Candidates behind a (possible) duplicate verdict, best score first (bug ids only)."""
+    if duplicates.verdict not in FLAGGED_VERDICTS:
         return []
     flagged = [
         c
@@ -143,7 +149,7 @@ def build_issue_draft(
     """Build the exact issue (title, body, allowlisted labels) that confirm will create."""
     title = neutralise_issue_refs(neutralise_mentions(report.title))[:ISSUE_TITLE_MAX_CHARS]
     labels = list(routing.labels)
-    if duplicates.verdict is DuplicateVerdict.POSSIBLE_DUPLICATE:
+    if duplicates.verdict in FLAGGED_VERDICTS:
         labels.append(POSSIBLE_DUPLICATE_LABEL)
     return IssueDraft(
         title=title,
