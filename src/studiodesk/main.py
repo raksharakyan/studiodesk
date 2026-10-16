@@ -17,22 +17,24 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 from starlette.concurrency import run_in_threadpool
 
 from studiodesk.actions.github import GitHubIssues
 from studiodesk.actions.proposals import InMemoryProposalStore, ProposalStore
 from studiodesk.actions.slack import SlackNotifier
-from studiodesk.api import actions, ask, bugs, health, pages, search
+from studiodesk.api import actions, ask, bugs, demo, health, pages, search
 from studiodesk.api import voice as voice_api
 from studiodesk.api.deps import get_settings
+from studiodesk.api.errors import validation_exception_handler
 from studiodesk.api.ratelimit import build_limiter, rate_limit_exceeded_handler
 from studiodesk.config import Settings
 from studiodesk.embeddings import Embedder, SentenceTransformerEmbedder
 from studiodesk.llm import LLMClient, build_llm
 from studiodesk.llm.limits import LLMConcurrencyGate
 from studiodesk.logging import configure_logging
-from studiodesk.middleware import BodySizeLimitMiddleware
+from studiodesk.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
 from studiodesk.vectorstore import QdrantStore, build_qdrant_client
 from studiodesk.voice import ElevenLabsClient, VoiceSessionQuota, build_http_client
 
@@ -186,7 +188,7 @@ def create_app(
         slack: Slack notifier. Built from settings if None (no-op without a webhook).
         voice: ElevenLabs client. Built from settings if None (None without an API key).
         voice_quota: Daily voice session counter. Built from settings if None.
-        static_dir: Directory served at `/static` (and `/voice` from its `voice.html`).
+        static_dir: Directory served at `/static` (and `/`, `/voice` from its HTML pages).
 
     Returns:
         A configured FastAPI instance.
@@ -219,13 +221,17 @@ def create_app(
     limiter = build_limiter(resolved.trusted_proxy_ips)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)
+    # Added last, so it is the outermost: 413s from the body limit get the headers too.
+    app.add_middleware(SecurityHeadersMiddleware, prod=is_prod)
     app.include_router(health.router)
     app.include_router(search.build_router(limiter, resolved.search_rate_limit))
     app.include_router(ask.build_router(limiter, resolved.ask_rate_limit))
     app.include_router(bugs.build_router(limiter, resolved.bugs_rate_limit))
     app.include_router(actions.build_router(limiter, resolved.actions_rate_limit))
     app.include_router(voice_api.build_router(limiter, resolved.voice_rate_limit))
+    app.include_router(demo.build_router(limiter, resolved.search_rate_limit))
     app.include_router(pages.build_router(static_dir))
     if static_dir.is_dir():
         app.mount("/static", pages.SecureStaticFiles(directory=static_dir), name="static")

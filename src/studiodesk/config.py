@@ -13,6 +13,9 @@ RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
 # ElevenLabs agent ids (e.g. `agent_01abc...`): kept URL-safe because they go in a query.
 ELEVENLABS_AGENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 VOICE_LLM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+# Public https URL without userinfo, port, query or fragment (shown on the main page).
+PUBLIC_URL_PATTERN = r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/-]*)?$"
+DEFAULT_SOURCE_REPO_URL = "https://github.com/raksharakyan/studiodesk"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 # The sample values in `.env.example`. A `.env` copied without filling them in must behave
@@ -56,6 +59,10 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     app_version: str = Field(default=__version__, min_length=1, max_length=64)
     max_request_bytes: int = Field(default=64_000, gt=0, le=10_000_000)
+    # Public source repository linked from the main page and GET /api/demo-info.
+    source_repo_url: str = Field(
+        default=DEFAULT_SOURCE_REPO_URL, max_length=255, pattern=PUBLIC_URL_PATTERN
+    )
 
     # LLM
     # Groq is the default (free tier); Anthropic is an optional second provider.

@@ -77,6 +77,12 @@ class VoiceSessionQuota:
             self._roll_day(self._clock().date())
             return self._used
 
+    def remaining_today(self) -> int:
+        """Slots still free today (read-only; never negative)."""
+        with self._lock:
+            self._roll_day(self._clock().date())
+            return max(self._max_per_day - self._used, 0)
+
     def _roll_day(self, today: date) -> None:
         """Reset the count when the UTC day changes (lock held)."""
         if today != self._day:

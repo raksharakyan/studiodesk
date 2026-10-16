@@ -132,6 +132,10 @@ class ProposalStore(Protocol):
         """True if no daily slot is left (created plus reserved >= cap)."""
         ...
 
+    def remaining_today(self) -> int | None:
+        """Daily slots still free (created plus reserved subtracted); None if uncapped."""
+        ...
+
 
 def _digest(token: str) -> bytes:
     """SHA-256 of the token, so plain tokens are never held server-side."""
@@ -210,6 +214,13 @@ class InMemoryProposalStore:
         """True if the daily cap is set and created plus reserved slots reach it."""
         with self._lock:
             return self._max_per_day is not None and self._slots_used() >= self._max_per_day
+
+    def remaining_today(self) -> int | None:
+        """Daily slots still free today (never negative), or None without a daily cap."""
+        with self._lock:
+            if self._max_per_day is None:
+                return None
+            return max(self._max_per_day - self._slots_used(), 0)
 
     def _roll_day(self) -> None:
         """Reset the daily count when the UTC day changes (lock held)."""
