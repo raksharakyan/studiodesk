@@ -7,6 +7,9 @@ storage backend (e.g. Redis via `storage_uri`).
 
 Client IPs come from the direct peer unless that peer is a configured trusted proxy (see
 `resolve_client_ip`), so the limit cannot be dodged by sending a fake X-Forwarded-For.
+IPv6 clients are keyed by their /64 prefix (one subscriber usually holds a whole /64, so
+rotating addresses inside it must not yield fresh buckets); IPv4-mapped IPv6 addresses
+count as the IPv4 address.
 """
 
 import ipaddress
@@ -23,6 +26,7 @@ from slowapi.errors import RateLimitExceeded
 RATE_LIMITED_DETAIL = "Rate limit exceeded"
 UNKNOWN_CLIENT = "unknown"
 FORWARDED_FOR_HEADER = "x-forwarded-for"
+IPV6_CLIENT_PREFIX = 64
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
@@ -40,10 +44,26 @@ def _is_trusted(address: IPAddress, trusted: Sequence[IPvAnyNetwork]) -> bool:
     return any(address.version == net.version and address in net for net in trusted)
 
 
+def client_bucket(value: str) -> str:
+    """Rate-limit key for a client address: IPv4 as is, IPv6 as its /64 network.
+
+    IPv4-mapped IPv6 (`::ffff:a.b.c.d`) becomes the IPv4 address; anything that is not an
+    IP (e.g. `unknown` or a test client name) is returned unchanged.
+    """
+    address = _parse_ip(value)
+    if address is None:
+        return value
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{address}/{IPV6_CLIENT_PREFIX}", strict=False))
+    return str(address)
+
+
 def resolve_client_ip(
     peer: str | None, forwarded_for: Sequence[str], trusted: Sequence[IPvAnyNetwork]
 ) -> str:
-    """Return the IP to rate-limit on.
+    """Return the rate-limit key: the client IP, bucketed by `client_bucket`.
 
     If the direct `peer` is a trusted proxy, X-Forwarded-For entries are walked from the
     right (closest hop first) and the first address that is not itself a trusted proxy
@@ -56,6 +76,13 @@ def resolve_client_ip(
         forwarded_for: Every X-Forwarded-For header value, in received order.
         trusted: Trusted proxy networks from Settings.
     """
+    return client_bucket(_resolve_raw(peer, forwarded_for, trusted))
+
+
+def _resolve_raw(
+    peer: str | None, forwarded_for: Sequence[str], trusted: Sequence[IPvAnyNetwork]
+) -> str:
+    """The client address per the trusted-proxy walk described in `resolve_client_ip`."""
     if peer is None:
         return UNKNOWN_CLIENT
     peer_ip = _parse_ip(peer)
