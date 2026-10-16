@@ -24,6 +24,7 @@
   <header class="site-header">
     <h1>StudioDesk Voice</h1>
     <p class="tagline">Talk to the StudioDesk support and QA agent for Starfall Outpost, or type a question.</p>
+    <p class="page-links"><a href="/#voice">Open the full StudioDesk demo page</a>, with examples to try and an explanation of where issues go.</p>
   </header>
 
   <main id="main" class="layout" tabindex="-1">
@@ -125,6 +126,11 @@
           <h3 id="bug-result-heading" tabindex="-1">Verdict</h3>
           <p><strong id="bug-verdict" class="verdict"></strong></p>
           <p id="bug-match" class="meta" hidden></p>
+
+          <div id="file-anyway" class="file-anyway" hidden>
+            <p class="hint" id="file-anyway-hint">Think this is a different bug? You can still draft an issue. It is labelled possible-duplicate and still needs your Confirm.</p>
+            <button type="button" id="file-anyway-btn" class="btn btn-secondary" aria-describedby="file-anyway-hint">File it anyway</button>
+          </div>
 
           <h3 id="candidates-heading">Similar reports</h3>
           <p id="candidates-empty" class="hint" hidden>No similar reports were found.</p>

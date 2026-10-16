@@ -1,4 +1,6 @@
-// StudioDesk Voice page.
+// StudioDesk shared page core: ask, bug check, issue preview with Confirm/Cancel, and voice.
+// Loaded by voice.html directly and by index.html through home.js (which adds the "Try these"
+// chips and the demo-info panel). init() runs when the page has a #voice-toggle button.
 //
 // Security rules (see docs/security/m3-review.md):
 // - All server, model and corpus text is rendered with textContent / createElement only.
@@ -47,6 +49,13 @@ const VERDICT_LABELS = {
   new: "New report: no duplicate found",
   possible_duplicate: "Possible duplicate",
   duplicate: "Duplicate of an existing report",
+};
+
+const PLATFORM_LABELS = {
+  pc: "PC",
+  ps5: "PS5",
+  xbox_series: "Xbox Series",
+  switch: "Switch",
 };
 
 const SLACK_LABELS = {
@@ -331,6 +340,46 @@ export function buildBugCheckBody(params) {
   return { body: { title, description, platform, version } };
 }
 
+/**
+ * True when the server offers "File it anyway" for this result: a duplicate or possible
+ * duplicate verdict with `file_anyway_available: true` and no confirmable preview yet.
+ */
+export function canFileAnyway(data) {
+  return Boolean(
+    data &&
+      data.file_anyway_available === true &&
+      (data.verdict === "duplicate" || data.verdict === "possible_duplicate") &&
+      !isProposalReady(data.proposed_action),
+  );
+}
+
+/** The /bugs/check body for "File it anyway": the same four fields plus file_anyway: true. */
+export function buildFileAnywayBody(body) {
+  return {
+    title: asText(body?.title),
+    description: asText(body?.description),
+    platform: asText(body?.platform),
+    version: asText(body?.version),
+    file_anyway: true,
+  };
+}
+
+/**
+ * One line of source metadata: "BUG-0002 · Bug report · PC, PS5 · v1.0.0 · relevance 0.91".
+ * Platform and version are shown only when the API sends them (a string or a list).
+ */
+export function formatSourceMeta(source) {
+  const parts = [asText(source?.doc_id)];
+  parts.push(DOC_TYPE_LABELS[source?.doc_type] ?? asText(source?.doc_type));
+  const rawPlatforms = Array.isArray(source?.platform) ? source.platform : source?.platform ? [source.platform] : [];
+  const platforms = rawPlatforms.map((p) => PLATFORM_LABELS[p] ?? asText(p)).filter(Boolean);
+  if (platforms.length) parts.push(platforms.join(", "));
+  const version = asText(source?.version).trim();
+  if (version) parts.push(`v${version.replace(/^v/i, "")}`);
+  parts.push(`relevance ${formatScore(source?.score)}`);
+  return parts.filter(Boolean).join(" · ");
+}
+
 // ---------------------------------------------------------------------------
 // DOM helpers
 // ---------------------------------------------------------------------------
@@ -374,6 +423,24 @@ function formatScore(value) {
   return Number.isFinite(n) ? n.toFixed(2) : "n/a";
 }
 
+/** Elements that only some pages have (the file-anyway controls); null when absent. */
+function optional(id) {
+  return typeof document !== "undefined" ? document.getElementById(id) : null;
+}
+
+/**
+ * Tell the page that a daily quota may have changed (an issue was filed or a voice session
+ * was requested), so the main page can refresh its limits. Carries no data.
+ */
+export const USAGE_EVENT = "studiodesk:usage";
+function notifyUsage() {
+  try {
+    if (typeof CustomEvent === "function") document.dispatchEvent?.(new CustomEvent(USAGE_EVENT));
+  } catch {
+    /* best effort */
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ask: rendering and calls
 // ---------------------------------------------------------------------------
@@ -404,8 +471,7 @@ function renderAnswer(question, data) {
   for (const source of sources) {
     const item = el("li");
     item.append(el("span", "card-title", source.title));
-    const type = DOC_TYPE_LABELS[source.doc_type] ?? asText(source.doc_type);
-    item.append(el("span", "card-meta", `${asText(source.doc_id)} · ${type} · relevance ${formatScore(source.score)}`));
+    item.append(el("span", "card-meta", formatSourceMeta(source)));
     if (source.snippet) item.append(el("p", "card-text", source.snippet));
     list.append(item);
   }
@@ -437,6 +503,9 @@ async function runAsk(question) {
 // with the form; the voice agent can never replace a pending proposal (see check_bug_report).
 let currentProposal = null; // { actionId, token, armed, busy, done }
 let bugSeq = 0;
+// The report behind the verdict on screen, so "File it anyway" re-checks exactly what was
+// judged (not whatever the form holds now). Only the four public fields; no token.
+let lastCheckBody = null;
 
 const AGENT_BLOCKED_STATUS =
   "The voice agent asked to check another bug. Confirm or cancel the issue preview below first.";
@@ -606,6 +675,25 @@ function renderBugResult(data, { changed = false, serverDate = null } = {}) {
   setText("routing-severity", data.routing?.severity ?? "unknown");
   fillTags("routing-labels", data.routing?.labels);
   renderProposal(data.proposed_action, { changed, serverDate });
+  renderFileAnyway(canFileAnyway(data) && lastCheckBody !== null);
+}
+
+/** Show or hide the "File it anyway" offer (pages without it simply skip this). */
+function renderFileAnyway(available) {
+  const box = optional("file-anyway");
+  const button = optional("file-anyway-btn");
+  if (!box || !button) return;
+  box.hidden = !available;
+  button.disabled = !available;
+}
+
+/** "File it anyway": re-run the check with file_anyway: true. Still needs Confirm to file. */
+async function onFileAnywayClick(event) {
+  if (!event.isTrusted || !lastCheckBody) return;
+  const button = optional("file-anyway-btn");
+  if (button) button.disabled = true;
+  const result = await runBugCheck(buildFileAnywayBody(lastCheckBody), "form");
+  if (!result.ok && button && !optional("file-anyway")?.hidden) button.disabled = false;
 }
 
 /**
@@ -628,8 +716,20 @@ async function runBugCheck(body, origin) {
     if (seq === bugSeq) {
       // Only the user's own form submit can replace a pending preview; flag the change.
       const changed = hasPendingProposal() && isProposalReady(data.proposed_action);
+      lastCheckBody = {
+        title: body.title,
+        description: body.description,
+        platform: body.platform,
+        version: body.version,
+      };
       renderBugResult(data, { changed, serverDate: meta.serverDate });
-      const suffix = isProposalReady(data.proposed_action) ? " Review the issue preview and press Confirm to file it." : "";
+      const ready = isProposalReady(data.proposed_action);
+      let suffix = ready ? " Review the issue preview and press Confirm to file it." : "";
+      if (ready && body.file_anyway === true) {
+        suffix = " You chose to file it anyway: the issue preview is labelled possible-duplicate. Review it and press Confirm to file it.";
+      } else if (canFileAnyway(data)) {
+        suffix = " If you are sure it is a different bug, you can still file it.";
+      }
       setStatus("bug-status", `Bug check complete: ${VERDICT_LABELS[data.verdict] ?? asText(data.verdict)}.${suffix}`);
       revealBugResult();
     }
@@ -686,8 +786,10 @@ async function onConfirmClick(event) {
     (result.querySelector("a") ?? $("action-status")).focus();
     setStatus("action-status", number ? `Confirmed. Issue #${number} was filed.` : "Confirmed. The issue was filed.");
     tellAgent(number ? `The user pressed Confirm and GitHub issue #${number} was filed.` : "The user pressed Confirm and the issue was filed.");
+    notifyUsage();
   } catch (err) {
     state.busy = false;
+    notifyUsage();
     const message = friendlyError(err, "confirm");
     setStatus("action-status", message, true);
     const status = err instanceof ApiError ? err.status : -1;
@@ -913,10 +1015,12 @@ async function startVoice() {
     try {
       session = await api("GET", "/voice/session");
     } catch (err) {
+      notifyUsage();
       setVoiceError(friendlyError(err, "session"));
       setVoiceStatus("disconnected");
       return;
     }
+    notifyUsage();
     const signedUrl = asText(session?.signed_url);
     if (!signedUrl.startsWith("wss://")) {
       setVoiceError("Voice could not be started. Please try again later.");
@@ -1054,6 +1158,7 @@ function init() {
   $("confirm-btn").addEventListener("click", onConfirmClick);
   $("cancel-btn").addEventListener("click", onCancelClick);
   $("proposal-banner-btn").addEventListener("click", revealProposal);
+  optional("file-anyway-btn")?.addEventListener("click", onFileAnywayClick);
   window.addEventListener("pagehide", () => {
     if (conversation) void conversation.endSession();
   });
