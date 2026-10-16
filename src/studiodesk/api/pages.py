@@ -30,6 +30,11 @@ ELEVENLABS_SDK_URL = (
     f"{CDN_SCRIPT_HOST}/npm/@elevenlabs/client@{ELEVENLABS_SDK_VERSION}/dist/lib.iife.js"
 )
 ELEVENLABS_CONNECT_HOSTS = ("wss://api.elevenlabs.io", "https://api.elevenlabs.io")
+# The only site allowed to frame the pages: the Hugging Face Space page embeds the app
+# (served from *.hf.space) in an iframe. No X-Frame-Options is sent (it cannot allowlist
+# an origin); Cross-Origin-Opener-Policy only applies to top-level documents, so it does
+# not affect the embed.
+FRAME_ANCESTOR = "https://huggingface.co"
 
 CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -42,7 +47,7 @@ CONTENT_SECURITY_POLICY = "; ".join(
         "worker-src 'self' blob:",
         "base-uri 'none'",
         "form-action 'none'",
-        "frame-ancestors 'none'",
+        f"frame-ancestors {FRAME_ANCESTOR}",
     ]
 )
 SECURITY_HEADERS = {
