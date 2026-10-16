@@ -116,6 +116,8 @@ def cited_sources(cited_ids: list[str], hits: list[ScoredChunk]) -> list[AnswerS
                 title=cited.chunk.title,
                 snippet=make_snippet(cited.chunk.text),
                 score=cited.score,
+                platform=list(cited.chunk.platform),
+                version=cited.chunk.version,
             )
         )
         if len(sources) == MAX_CITED_IDS:

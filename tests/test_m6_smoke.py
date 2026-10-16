@@ -195,3 +195,21 @@ def test_422_never_echoes_input(store: QdrantStore, fake_embedder: Embedder) -> 
         assert error["msg"] == "Invalid value"
     assert "SECRET-INPUT-MARKER" * 2 not in response.text
     assert "max_length" not in response.text  # no ctx values
+
+
+def test_ask_sources_carry_platform_and_version(
+    ingested_store: QdrantStore, fake_embedder: Embedder
+) -> None:
+    from studiodesk.models.answer import LLMAnswer
+
+    answer = LLMAnswer(answer="See [BUG-0001].", cited_ids=["BUG-0001"], insufficient_context=False)
+    for client in run(ingested_store, fake_embedder, llm=FakeLLM({LLMAnswer: answer})):
+        body = client.post(
+            "/ask", json={"question": "Why does my save get corrupted after cryo sleep on PS5?"}
+        )
+    [source] = body.json()["sources"]
+    assert source["doc_id"] == "BUG-0001"
+    assert isinstance(source["platform"], list) and all(
+        isinstance(p, str) for p in source["platform"]
+    )
+    assert source["version"] is None or isinstance(source["version"], str)
