@@ -13,7 +13,7 @@
   },
   "questions": [
     {
-      "id": "cryo-save-ps5",
+      "id": "cryo-save",
       "label": "Cryo sleep save corruption on PS5",
       "question": "Why does my save get corrupted after cryo sleep on PS5, and is it fixed?",
       "response": {
