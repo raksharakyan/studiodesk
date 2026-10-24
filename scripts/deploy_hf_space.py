@@ -1,5 +1,8 @@
 """Deploy StudioDesk to a public Hugging Face Docker Space (idempotent).
 
+Requires a Hugging Face PRO account: Docker Spaces are PRO-only. The public showcase is
+the static GitHub Pages site instead (`scripts/record_showcase.py`, `scripts/build_site.py`).
+
 Builds a staging directory in a temporary folder from an explicit allowlist (Dockerfile,
 .dockerignore, pyproject.toml, uv.lock, the git-tracked files under src/ and data/, plus a
 generated Space README with the YAML front matter HF needs). It aborts if src/ or data/
@@ -24,16 +27,13 @@ Exit codes: 0 ok, 1 Hugging Face API error, 2 configuration error, 3 aborted.
 """
 
 import argparse
-import base64
 import ipaddress
-import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,9 +42,30 @@ from typing import Any, Protocol
 from studiodesk.config import (
     DEFAULT_SOURCE_REPO_URL,
     GITHUB_REPO_PATTERN,
-    PLACEHOLDER_VALUES,
     PUBLIC_URL_PATTERN,
 )
+from studiodesk.secretscan import (
+    MIN_SCANNED_SECRET_CHARS,
+    SECRET_NAME_RE,
+    TOKEN_PATTERNS,
+    encoded_forms,
+    is_set,
+    needles_for,
+    read_dotenv,
+    scan_bytes,
+    secret_like_values,
+)
+
+# Re-exported: the scan lives in `studiodesk.secretscan` (shared with the site build).
+__all__ = [
+    "MIN_SCANNED_SECRET_CHARS",
+    "SECRET_NAME_RE",
+    "TOKEN_PATTERNS",
+    "encoded_forms",
+    "is_set",
+    "read_dotenv",
+    "scan_bytes",
+]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
@@ -86,25 +107,7 @@ FIXED_VARIABLES = {
 LLM_PROVIDERS = frozenset({"groq", "anthropic"})
 DEFAULT_COLLECTION = "studiodesk"
 COLLECTION_PATTERN = r"^[A-Za-z0-9_-]{1,255}$"
-# Names whose `.env` values must never appear in a staged file.
-SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|WEBHOOK)", re.IGNORECASE)
-MIN_SCANNED_SECRET_CHARS = 8
 SPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
-_DOTENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_QUOTED_VALUE_RE = re.compile(r"""^(['"])(.*)\1(?:\s+#.*)?$""")
-_INLINE_COMMENT_RE = re.compile(r"\s+#")
-# Well-known credential shapes; any match in a staged file aborts the deploy.
-TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
-    ("GitHub token", re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}")),
-    ("GitHub fine-grained token", re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{22,}")),
-    ("Groq key", re.compile(rb"\bgsk_[A-Za-z0-9]{20,}")),
-    ("Anthropic key", re.compile(rb"\bsk-ant-[A-Za-z0-9_-]{20,}")),
-    ("Hugging Face token", re.compile(rb"\bhf_[A-Za-z0-9]{30,}")),
-    ("ElevenLabs key", re.compile(rb"\bsk_[0-9a-f]{32,}")),
-    ("Slack token", re.compile(rb"\bxox[abp]-[A-Za-z0-9-]{10,}")),
-    ("Slack webhook", re.compile(rb"hooks\.slack\.com/services/")),
-)
 
 README_TEMPLATE = """---
 title: StudioDesk
@@ -181,46 +184,6 @@ class SpaceSettings:
 
     variables: dict[str, str]
     secrets: dict[str, str]
-
-
-def read_dotenv(path: Path) -> dict[str, str]:
-    """Parse a `.env` file the way pydantic-settings does (python-dotenv), else locally.
-
-    No `${VAR}` interpolation (the shell environment must not leak in). A missing file
-    yields an empty dict. Values are returned, never printed.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        from dotenv import dotenv_values
-    except ImportError:  # pragma: no cover - python-dotenv ships with pydantic-settings
-        return _parse_dotenv(path)
-    parsed = dotenv_values(path, interpolate=False, encoding="utf-8")
-    return {k: v or "" for k, v in parsed.items() if k and _ENV_NAME_RE.fullmatch(k)}
-
-
-def _parse_dotenv(path: Path) -> dict[str, str]:
-    """Fallback `.env` parser: KEY=VALUE, `export`, quotes and inline `# comments`."""
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        match = _DOTENV_LINE_RE.match(line)
-        if match is None:
-            continue
-        key, value = match.groups()
-        quoted = _QUOTED_VALUE_RE.match(value)
-        if quoted is not None:
-            value = quoted.group(2)
-        else:
-            value = _INLINE_COMMENT_RE.split(value, maxsplit=1)[0].rstrip()
-        values[key] = value
-    return values
-
-
-def is_set(value: str | None) -> bool:
-    """True for a non-empty value that is not an `.env.example` placeholder."""
-    return bool(value and value.strip() and value.strip() not in PLACEHOLDER_VALUES)
 
 
 def resolve_token(environ: Mapping[str, str], dotenv: Mapping[str, str]) -> str | None:
@@ -342,37 +305,9 @@ def staged_files(staging: Path) -> list[str]:
 def secret_values(dotenv: Mapping[str, str], environ: Mapping[str, str]) -> list[str]:
     """Values that must never be uploaded: every secret-like `.env` entry, the Space
     secrets, and HF_TOKEN from either source (placeholders and short values excluded)."""
-    names = {k for k in dotenv if SECRET_NAME_RE.search(k)}
-    names |= {*SPACE_SECRET_NAMES, ANTHROPIC_SECRET_NAME, "SLACK_WEBHOOK_URL", TOKEN_NAME}
-    values = {dotenv.get(name, "").strip() for name in names}
-    values.add(environ.get(TOKEN_NAME, "").strip())
-    return sorted(v for v in values if is_set(v) and len(v) >= MIN_SCANNED_SECRET_CHARS)
-
-
-def encoded_forms(secret: str) -> set[bytes]:
-    """The secret raw and as base64 (standard and URL-safe, unpadded), URL-encoded and
-    JSON-escaped, so a staged copy in any of those forms is caught too."""
-    raw = secret.encode("utf-8")
-    return {
-        raw,
-        base64.b64encode(raw).rstrip(b"="),
-        base64.urlsafe_b64encode(raw).rstrip(b"="),
-        urllib.parse.quote(secret, safe="").encode("ascii"),
-        json.dumps(secret)[1:-1].encode("utf-8"),
-    }
-
-
-def scan_bytes(data: bytes, needles: Sequence[bytes]) -> str | None:
-    """Why `data` must not be uploaded (a known token shape or a secret value), or None.
-
-    The reason names the kind of match only, never the matched text.
-    """
-    for name, pattern in TOKEN_PATTERNS:
-        if pattern.search(data):
-            return f"looks like a {name}"
-    if any(needle in data for needle in needles):
-        return "contains a secret value from .env (raw or encoded)"
-    return None
+    extra = (*SPACE_SECRET_NAMES, ANTHROPIC_SECRET_NAME, "SLACK_WEBHOOK_URL", TOKEN_NAME)
+    values = secret_like_values(dotenv, extra)
+    return sorted({*values, *secret_like_values({TOKEN_NAME: environ.get(TOKEN_NAME, "")})})
 
 
 def check_staging(staging: Path, secrets: Sequence[str]) -> None:
@@ -381,7 +316,7 @@ def check_staging(staging: Path, secrets: Sequence[str]) -> None:
 
     Error messages name the file and the kind of match, never the secret.
     """
-    needles = sorted({form for secret in secrets for form in encoded_forms(secret)})
+    needles = needles_for(secrets)
     for path in sorted(staging.rglob("*")):
         relative = path.relative_to(staging).as_posix()
         if path.is_symlink():
