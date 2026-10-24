@@ -40,10 +40,10 @@ jobs:
         run: uv run python scripts/build_site.py
 
       - name: Configure Pages
-        uses: actions/configure-pages@TODO_SHA # TODO: pin latest v5 tag by full SHA
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@TODO_SHA # TODO: pin latest tag by full SHA
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: _site
 
@@ -57,4 +57,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@TODO_SHA # TODO: pin latest v4 tag by full SHA
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
