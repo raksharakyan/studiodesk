@@ -9,10 +9,23 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from studiodesk import __version__
 
 GITHUB_REPO_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
-RATE_LIMIT_PATTERN = r"^[1-9]\d{0,5}/(second|minute|hour|day)$"
+# One limit like "10/minute", or up to four joined by ";" like "3/minute;30/day" (slowapi
+# enforces all of them).
+_ONE_RATE_LIMIT = r"[1-9]\d{0,5}/(?:second|minute|hour|day)"
+RATE_LIMIT_PATTERN = rf"^{_ONE_RATE_LIMIT}(?:;{_ONE_RATE_LIMIT}){{0,3}}$"
+# Stricter per-client defaults for the public prod deployment (used unless set explicitly).
+PROD_RATE_LIMITS = {
+    "ask_rate_limit": "3/minute;30/day",
+    "bugs_rate_limit": "3/minute;20/day",
+    "actions_rate_limit": "2/minute;5/day",
+    "voice_rate_limit": "2/minute;5/day",
+}
 # ElevenLabs agent ids (e.g. `agent_01abc...`): kept URL-safe because they go in a query.
 ELEVENLABS_AGENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 VOICE_LLM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+# Public https URL without userinfo, port, query or fragment (shown on the main page).
+PUBLIC_URL_PATTERN = r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/-]*)?$"
+DEFAULT_SOURCE_REPO_URL = "https://github.com/raksharakyan/studiodesk"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SLACK_WEBHOOK_HOST = "hooks.slack.com"
 # The sample values in `.env.example`. A `.env` copied without filling them in must behave
@@ -56,6 +69,10 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     app_version: str = Field(default=__version__, min_length=1, max_length=64)
     max_request_bytes: int = Field(default=64_000, gt=0, le=10_000_000)
+    # Public source repository linked from the main page and GET /api/demo-info.
+    source_repo_url: str = Field(
+        default=DEFAULT_SOURCE_REPO_URL, max_length=255, pattern=PUBLIC_URL_PATTERN
+    )
 
     # LLM
     # Groq is the default (free tier); Anthropic is an optional second provider.
@@ -81,6 +98,10 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = Field(default=4, ge=1, le=64)
     llm_concurrency_wait_s: float = Field(default=2.0, ge=0, le=30)
     llm_busy_retry_after_s: int = Field(default=5, ge=1, le=300)
+    # Process-wide LLM call budget across all clients (one unit per structured call):
+    # a sliding 60 s window and a UTC-day total. Over budget -> 503 + Retry-After.
+    llm_max_calls_per_minute: int = Field(default=6, ge=1, le=10_000)
+    llm_max_calls_per_day: int = Field(default=300, ge=1, le=1_000_000)
     # Interactive routes: retry a transient failure at most this often, and only when the
     # wait (Retry-After or backoff) is <= llm_max_retry_wait_s; longer waits fail fast (503).
     llm_max_retries: int = Field(default=1, ge=0, le=3)
@@ -137,6 +158,9 @@ class Settings(BaseSettings):
     trusted_proxy_ips: Annotated[list[IPvAnyNetwork], NoDecode] = Field(
         default_factory=list, max_length=64
     )
+    # Log each request's peer IP and raw X-Forwarded-For at INFO (nothing else), to read a
+    # platform's proxy hops from its logs before setting trusted_proxy_ips. Off by default.
+    debug_log_client_ip: bool = False
 
     # GitHub Issues
     github_token: SecretStr | None = None
@@ -204,6 +228,15 @@ class Settings(BaseSettings):
         """Disable voice sessions in prod unless VOICE_ENABLED was set explicitly."""
         if self.app_env == "prod" and "voice_enabled" not in self.model_fields_set:
             object.__setattr__(self, "voice_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _strict_rate_limits_in_prod_by_default(self) -> "Settings":
+        """In prod, use PROD_RATE_LIMITS for every rate limit not set explicitly."""
+        if self.app_env == "prod":
+            for name, value in PROD_RATE_LIMITS.items():
+                if name not in self.model_fields_set:
+                    object.__setattr__(self, name, value)
         return self
 
     @model_validator(mode="after")

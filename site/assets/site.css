@@ -1,0 +1,69 @@
+/* Recorded-demo additions on top of the shared styles.css (copied to assets/styles.css by
+   scripts/build_site.py). Only existing colour tokens are used, so the AA contrast pairs from
+   styles.css hold in both light and dark themes. */
+
+/* "This is a recorded demo" banner at the top of the page. */
+.replay-banner {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--note-bg);
+  color: var(--note-text);
+  border: 2px solid var(--note-text);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+}
+
+.replay-banner p {
+  margin: 0;
+}
+
+.replay-banner a {
+  color: inherit;
+  font-weight: 700;
+}
+
+/* The chip whose recorded result is currently shown: a thicker frame and an underline, so the
+   state is not shown by colour alone (aria-pressed carries it for assistive tech). */
+.chip[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--user-bubble);
+  box-shadow: inset 0 0 0 2px var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* Chips stay disabled until the recorded data has loaded. */
+.chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* The recorded bug report (in place of the live form). */
+.recorded-report .report-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.replay-filing {
+  margin: 0.75rem 0 0;
+}
+
+.replay-filing a {
+  color: inherit;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+#load-status:empty {
+  display: none;
+}
+
+/* The recorded transcript is short and static, so it is shown in full (no scroll area). */
+#transcript {
+  max-height: none;
+  overflow: visible;
+}
+
+#proposal {
+  scroll-margin-top: 0.75rem;
+}

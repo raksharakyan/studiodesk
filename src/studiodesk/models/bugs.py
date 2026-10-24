@@ -7,7 +7,7 @@ range constraints (structured outputs cannot enforce them), so the server clamps
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from studiodesk.models.actions import ProposedAction
 from studiodesk.models.documents import (
@@ -56,6 +56,17 @@ class NewBugReport(BaseModel):
         if self.actual:
             lines.append(f"Actual: {self.actual}")
         return "\n".join(lines)
+
+
+class BugCheckRequest(NewBugReport):
+    """Body of `POST /bugs/check`: the report plus the optional "file anyway" opt-in.
+
+    `file_anyway` only matters for a `duplicate` verdict: the issue is then still proposed
+    (labelled `possible-duplicate`, with the server-written duplicate line). It is a strict
+    boolean, so `"true"` or `1` are rejected rather than coerced.
+    """
+
+    file_anyway: StrictBool = False
 
 
 class CandidateJudgement(BaseModel):
@@ -137,8 +148,11 @@ class BugCheckResponse(BaseModel):
 
     `duplicate_of` is the canonical original (the root of the matched report's
     `duplicate_of` chain); `matched_report` is the report that actually matched.
-    `proposed_action` is set unless the verdict is `duplicate`; nothing happens until it is
-    confirmed via `POST /actions/{action_id}/confirm`.
+    `proposed_action` is set unless the verdict is `duplicate` (or, for a duplicate, when
+    the request set `file_anyway`); nothing happens until it is confirmed via
+    `POST /actions/{action_id}/confirm`. `file_anyway_available` is true on a `duplicate`
+    verdict when filing is enabled and configured, i.e. re-sending with `file_anyway`
+    would propose an issue.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -149,3 +163,4 @@ class BugCheckResponse(BaseModel):
     candidates: list[DuplicateCandidate]
     routing: RoutingResult
     proposed_action: ProposedAction | None
+    file_anyway_available: bool = False

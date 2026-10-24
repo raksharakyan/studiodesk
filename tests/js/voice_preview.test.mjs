@@ -347,6 +347,67 @@ test("expiry after cancel leaves the cancelled status alone", async () => {
   assert.match(byId("action-status").textContent, /Cancelled\. Nothing was filed/);
 });
 
+// --- file it anyway (M6) ----------------------------------------------------------
+const fileAnywayDuplicate = () => ({ ...duplicateBody(), file_anyway_available: true });
+
+test("a duplicate with file_anyway_available shows File it anyway; others hide it", async () => {
+  await settle();
+  bugResponses.push(fileAnywayDuplicate());
+  await submitForm();
+  assert.equal(byId("file-anyway").hidden, false);
+  assert.equal(byId("file-anyway-btn").disabled, false);
+  assert.match(byId("bug-status").textContent, /still file it/);
+  bugResponses.push(duplicateBody());
+  await submitForm();
+  assert.equal(byId("file-anyway").hidden, true, "no flag: hidden");
+  bugResponses.push(bugBody("fa0"));
+  await submitForm();
+  assert.equal(byId("file-anyway").hidden, true, "ready proposal: hidden");
+  await settle();
+});
+
+test("File it anyway re-checks the judged report with file_anyway and still needs Confirm", async () => {
+  await settle();
+  bugResponses.push(fileAnywayDuplicate());
+  await submitForm();
+  // The user edits the form afterwards: the re-check must use the report that was judged.
+  byId("bug-title").value = "Something else entirely";
+  const before = fetchesTo("/bugs/check").length;
+  await byId("file-anyway-btn").listeners.click({ isTrusted: false });
+  await ticks();
+  assert.equal(fetchesTo("/bugs/check").length, before, "untrusted click ignored");
+
+  const labelled = bugBody("fa1");
+  labelled.verdict = "duplicate";
+  labelled.duplicate_of = "BUG-0001";
+  labelled.proposed_action.preview.labels = ["bug", "possible-duplicate"];
+  bugResponses.push(labelled);
+  await byId("file-anyway-btn").listeners.click({ isTrusted: true });
+  await ticks();
+  assert.deepEqual(fetchesTo("/bugs/check").at(-1).body, { ...goodBug, file_anyway: true });
+  assert.equal(byId("file-anyway").hidden, true);
+  assert.equal(byId("proposal-title").textContent, "Preview fa1");
+  assert.deepEqual(byId("proposal-labels").children.map((c) => c.textContent), ["bug", "possible-duplicate"]);
+  assert.match(byId("bug-status").textContent, /possible-duplicate/);
+  assert.equal(byId("confirm-btn").disabled, true, "confirm starts disarmed");
+  assert.equal(fetchesTo("/actions/fa1/confirm").length, 0, "nothing filed without Confirm");
+  assert.equal(banner().hidden, false);
+  await settle();
+});
+
+test("a failed File it anyway re-enables the button and files nothing", async () => {
+  await settle();
+  bugResponses.push(fileAnywayDuplicate());
+  await submitForm();
+  bugResponses.push(reply({ detail: "boom" }, { status: 503 }));
+  await byId("file-anyway-btn").listeners.click({ isTrusted: true });
+  await ticks();
+  assert.equal(byId("file-anyway-btn").disabled, false);
+  assert.equal(byId("file-anyway").hidden, false);
+  assert.match(byId("bug-status").textContent, /temporarily unavailable/);
+  assert.equal(banner().hidden, true);
+});
+
 // --- transcript ---------------------------------------------------------------------
 const transcriptLines = () => byId("transcript").children.map((li) => li.children.map((c) => c.textContent));
 

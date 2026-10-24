@@ -7,7 +7,7 @@ only carry such limits as descriptions, so the server enforces them after parsin
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from studiodesk.models.documents import DocType
+from studiodesk.models.documents import DocType, Platform, Version
 from studiodesk.models.search import SNIPPET_MAX_CHARS, SearchFilters
 
 QUESTION_MAX_CHARS = 1_000
@@ -37,7 +37,11 @@ class LLMAnswer(BaseModel):
 
 
 class AnswerSource(BaseModel):
-    """A retrieved document the answer cites. `title`/`snippet` are untrusted data."""
+    """A retrieved document the answer cites. `title`/`snippet` are untrusted data.
+
+    `platform` and `version` come from the chunk payload (enum values and the validated
+    version string), so source cards can show them.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -46,6 +50,8 @@ class AnswerSource(BaseModel):
     title: str
     snippet: str = Field(max_length=SNIPPET_MAX_CHARS)
     score: float
+    platform: list[Platform] = Field(default_factory=list, max_length=len(Platform))
+    version: Version | None = None
 
 
 class AnswerResponse(BaseModel):

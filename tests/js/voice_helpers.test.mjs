@@ -424,6 +424,38 @@ test("proposalLifetimeMs is null for missing or invalid input", () => {
   }
 });
 
+// --- file it anyway and source metadata (M6) ---------------------------------------
+test("canFileAnyway needs a duplicate verdict, the server flag and no ready proposal", () => {
+  const ready = { action_id: "a", confirm_token: "t" };
+  assert.equal(mod.canFileAnyway({ verdict: "duplicate", file_anyway_available: true, proposed_action: null }), true);
+  assert.equal(mod.canFileAnyway({ verdict: "possible_duplicate", file_anyway_available: true }), true);
+  assert.equal(mod.canFileAnyway({ verdict: "duplicate", file_anyway_available: true, proposed_action: ready }), false);
+  assert.equal(mod.canFileAnyway({ verdict: "new", file_anyway_available: true }), false);
+  assert.equal(mod.canFileAnyway({ verdict: "duplicate" }), false);
+  assert.equal(mod.canFileAnyway({ verdict: "duplicate", file_anyway_available: "true" }), false);
+  assert.equal(mod.canFileAnyway(null), false);
+});
+
+test("buildFileAnywayBody keeps only the four fields and adds file_anyway", () => {
+  const body = mod.buildFileAnywayBody({
+    title: "T", description: "D", platform: "pc", version: "1.0.0", confirm_token: "tok", extra: 1,
+  });
+  assert.deepEqual(body, { title: "T", description: "D", platform: "pc", version: "1.0.0", file_anyway: true });
+});
+
+test("formatSourceMeta shows id, type, platforms and version when present", () => {
+  assert.equal(
+    mod.formatSourceMeta({ doc_id: "BUG-0002", doc_type: "bug_report", platform: ["pc", "ps5"], version: "1.0.0", score: 0.912 }),
+    "BUG-0002 · Bug report · PC, PS5 · v1.0.0 · relevance 0.91",
+  );
+  assert.equal(
+    mod.formatSourceMeta({ doc_id: "PN-1", doc_type: "patch_note", platform: "switch", version: "v1.3.1", score: 0.5 }),
+    "PN-1 · Patch notes · Switch · v1.3.1 · relevance 0.50",
+  );
+  assert.equal(mod.formatSourceMeta({ doc_id: "DOC-1", doc_type: "doc", score: "x" }), "DOC-1 · Support doc · relevance n/a");
+  assert.equal(mod.formatSourceMeta(null), "relevance n/a");
+});
+
 // --- run ----------------------------------------------------------------------------
 let failed = 0;
 for (const { name, fn } of tests) {

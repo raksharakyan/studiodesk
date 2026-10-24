@@ -3,6 +3,7 @@ name = "studiodesk"
 version = "0.1.0"
 description = "AI support and QA agent for game studios: RAG over bug reports, crash logs and patch notes."
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "anthropic>=1.12.1",
     "fastapi>=0.142.2",

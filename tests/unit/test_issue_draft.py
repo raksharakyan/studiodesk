@@ -143,13 +143,22 @@ def test_possible_duplicate_label_and_line() -> None:
     assert "BUG-0005" not in draft.body
 
 
-@pytest.mark.parametrize("verdict", [DuplicateVerdict.NEW, DuplicateVerdict.DUPLICATE])
-def test_no_possible_duplicate_label_otherwise(verdict: DuplicateVerdict) -> None:
-    dup = check(verdict, candidate("BUG-0003", 0.9, True))
+def test_no_possible_duplicate_label_for_new() -> None:
+    dup = check(DuplicateVerdict.NEW, candidate("BUG-0003", 0.9, True))
     draft = build_issue_draft(report(), ROUTING, dup)
     assert "possible-duplicate" not in draft.labels
     assert "Possible duplicates" not in draft.body
     assert flagged_candidates(dup) == []
+
+
+def test_duplicate_filed_anyway_is_flagged_with_canonical_ids() -> None:
+    # A duplicate draft is only built when the user files it anyway: it must say so.
+    dup = check(DuplicateVerdict.DUPLICATE, candidate("BUG-0006", 0.9, True)).model_copy(
+        update={"canonical_ids": {"BUG-0006": "BUG-0002"}}
+    )
+    draft = build_issue_draft(report(), ROUTING, dup)
+    assert draft.labels[-1] == "possible-duplicate"
+    assert "Possible duplicates: BUG-0002 (score 0.90)" in draft.body
 
 
 def test_flagged_candidates_require_bug_ids_and_are_capped() -> None:

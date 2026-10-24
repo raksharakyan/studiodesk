@@ -4,6 +4,8 @@
 
 It ships with a measured evaluation suite and a security review for every milestone.
 
+**Live showcase:** https://raksharakyan.github.io/studiodesk/ (a static GitHub Pages site with real, recorded answers, bug checks and a voice transcript; there is no live backend, so nothing on it can file an issue). To try it interactively, see [Run it yourself](#run-it-yourself).
+
 > Demo data is a fictional game, **Starfall Outpost**: a co-op sci-fi survival game on PC, PS5, Xbox Series and Switch. The dataset has 66 bug reports, 25 crash logs, 10 patch notes and 4 support docs.
 
 ## What it does
@@ -46,6 +48,10 @@ From `uv run python -m evals.run` (answerer `openai/gpt-oss-120b`, judge `qwen/q
 | Routing (kNN) | 76 bugs | component accuracy 0.57 (the weakest area; see below) |
 | Prompt injection | 14 attacks | **14/14** passed: no leaks, no fake citations, no forced verdicts, no actions |
 
+## Run it yourself
+
+The showcase only replays recorded results. To ask your own questions, check your own bug reports or try voice, run StudioDesk locally with your own free-tier keys (Quickstart below).
+
 ## Quickstart
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
@@ -86,6 +92,17 @@ uvx pip-audit                          # dependency audit
 
 CI (GitHub Actions) runs lint, format, mypy, tests, dataset validation, the offline eval harness and dependency audits on every push.
 
+### Showcase and deployment
+
+```bash
+uv run python scripts/record_showcase.py   # call /ask and /bugs/check in-process with your keys → site/data/showcase.json
+uv run python scripts/build_site.py        # site/ → _site/ (schema check + secret scan, no network)
+```
+
+The recorder never confirms anything: GitHub and Slack are stand-ins that raise if used, and confirm tokens and action ids are removed before writing. `.github/workflows/pages.yml` builds `_site/` and publishes it to GitHub Pages on every push to `main`.
+
+`scripts/deploy_hf_space.py` deploys the full app to a Hugging Face Docker Space. It needs a Hugging Face **PRO** account, since Docker Spaces are PRO-only.
+
 ## Security
 
 - Secrets are only ever read from the environment as `SecretStr` and are redacted from logs. Scans show no keys in the code or git history.
@@ -100,7 +117,8 @@ CI (GitHub Actions) runs lint, format, mypy, tests, dataset validation, the offl
 src/studiodesk/   app: api/, agent/ (answer, duplicates, routing), llm/, actions/, voice/, ingest/, static/
 data/synthetic/   Starfall Outpost dataset
 evals/            eval cases, harness, reports
-scripts/          ingest, dataset validation, issue labels, voice agent setup
+scripts/          ingest, dataset validation, issue labels, voice agent setup, showcase recording and site build
+site/             static GitHub Pages showcase (recorded results in site/data/showcase.json)
 voice/agent.json  ElevenLabs agent config as code
 docs/security/    per-milestone security reviews
 ```

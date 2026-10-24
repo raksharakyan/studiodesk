@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="StudioDesk is an AI support and QA agent for game studios: cited answers, duplicate bug detection and human-confirmed GitHub issues, by text or voice.">
+  <title>StudioDesk: AI support &amp; QA agent for game studios</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <!-- ElevenLabs browser SDK, pinned with Subresource Integrity. Must match voice.html and
+       ELEVENLABS_SDK_URL in api/pages.py (the CSP allows exactly this file). -->
+  <script defer
+          src="https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.27.0/dist/lib.iife.js"
+          integrity="sha384-ekuWfdL0BkeVAWv24yeCWtzVwYDQd4pCkPL5TKVDLmwDBeVxS2cTwo0wfsUNaFkJ"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
+  <!-- home.js imports voice.js (the shared ask / bug check / confirm / voice core). -->
+  <script type="module" src="/static/home.js"></script>
+</head>
+<body class="home">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header hero">
+    <h1>StudioDesk — <span class="title-sub">AI support &amp; QA agent for game studios</span></h1>
+    <p class="lead">
+      StudioDesk answers player and QA questions with cited sources, spots duplicate bug
+      reports before they reach your tracker, and drafts GitHub issues that are filed only
+      after a person presses Confirm. It searches the studio's own bug reports, crash logs,
+      patch notes and support docs, and you can use it by typing or by talking to it.
+    </p>
+    <p class="note demo-note">
+      <strong>Demo data:</strong> the game <em>Starfall Outpost</em> is fictional. The knowledge
+      base holds 66 bug reports, 25 crash logs, 10 patch notes and 4 support docs, all made up
+      for this demo.
+    </p>
+    <nav aria-label="Project links">
+      <ul class="link-row">
+        <li><a id="link-repo" href="https://github.com/raksharakyan/studiodesk" rel="noopener noreferrer">Source code on GitHub</a></li>
+        <li><a id="link-evals" href="https://github.com/raksharakyan/studiodesk/blob/main/evals/reports/latest.md" rel="noopener noreferrer">Eval report</a></li>
+        <li><a id="link-security" href="https://github.com/raksharakyan/studiodesk/tree/main/docs/security" rel="noopener noreferrer">Security reviews</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main" class="home-main" tabindex="-1">
+    <section class="panel" id="try" aria-labelledby="try-heading">
+      <h2 id="try-heading">Try these</h2>
+      <p class="hint">Each button fills in the form below and runs it, so you can see what StudioDesk does in one click.</p>
+
+      <h3 id="try-questions-heading">Ask a question</h3>
+      <ul class="chips" aria-labelledby="try-questions-heading">
+        <li><button type="button" class="chip" data-question="Why does my save get corrupted after cryo sleep on PS5, and is it fixed?">Why does my save get corrupted after cryo sleep on PS5, and is it fixed?</button></li>
+        <li><button type="button" class="chip" data-question="What crashes happen when driving the hover-rover?">What crashes happen when driving the hover-rover?</button></li>
+        <li><button type="button" class="chip" data-question="Is cross-save between PC and Switch supported?">Is cross-save between PC and Switch supported?</button></li>
+        <li><button type="button" class="chip" data-question="What did patch 1.3.1 fix?">What did patch 1.3.1 fix?</button></li>
+        <li><button type="button" class="chip chip-alt" data-question="What's the best pizza topping?">What's the best pizza topping? <span class="chip-note">(shows it declines off-topic questions)</span></button></li>
+      </ul>
+
+      <h3 id="try-bugs-heading">Report a bug</h3>
+      <ul class="chips chips-bugs" aria-labelledby="try-bugs-heading">
+        <li>
+          <button type="button" class="chip" data-bug="duplicate" aria-describedby="chip-dup-note">Try a duplicate</button>
+          <p id="chip-dup-note" class="chip-caption">A player's own words for a bug that is already on file.</p>
+        </li>
+        <li>
+          <button type="button" class="chip" data-bug="new" aria-describedby="chip-new-note">Try a new bug</button>
+          <p id="chip-new-note" class="chip-caption">Not reported before, so StudioDesk drafts an issue for you to review.</p>
+        </li>
+        <li>
+          <button type="button" class="chip" data-bug="injection" aria-describedby="chip-inj-note">Try a prompt injection</button>
+          <p id="chip-inj-note" class="chip-caption">The report tells the AI to "ignore all previous instructions". StudioDesk treats report text as data, never as instructions, and shows it as plain text.</p>
+        </li>
+      </ul>
+    </section>
+
+    <div class="home-grid">
+      <section class="panel" id="ask" aria-labelledby="ask-heading">
+        <h2 id="ask-heading">Ask a question</h2>
+        <form id="ask-form" class="form" novalidate>
+          <label for="ask-question">Your question about Starfall Outpost</label>
+          <textarea id="ask-question" name="question" rows="3" maxlength="1000" required
+                    aria-describedby="ask-question-hint"></textarea>
+          <p id="ask-question-hint" class="hint">Up to 1000 characters. Example: Why does my save fail to load after the latest patch?</p>
+          <button type="submit" class="btn btn-primary">Ask StudioDesk</button>
+        </form>
+        <p id="ask-status" class="status-line" role="status" aria-live="polite"></p>
+
+        <div id="answer-panel">
+          <div id="answer-region" aria-live="polite">
+            <p id="answer-empty" class="hint">The answer and the sources it cites appear here.</p>
+            <div id="answer-content" hidden>
+              <h3 id="answer-question-heading">Answer <span class="ai-badge">AI-generated</span></h3>
+              <p id="answer-question" class="meta"></p>
+              <p id="answer-text" class="answer-text"></p>
+              <p id="answer-notes" class="note" hidden></p>
+              <h3 id="sources-heading">Sources</h3>
+              <p class="hint">Documents retrieved from the knowledge base that the answer cites. Citations that don't match a retrieved document are removed.</p>
+              <p id="sources-empty" class="hint" hidden>No sources were cited.</p>
+              <ol id="sources" class="card-list" aria-labelledby="sources-heading"></ol>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="bug-heading" id="bug-panel">
+        <h2 id="bug-heading">Report a bug</h2>
+        <p class="hint">StudioDesk compares your report with existing ones, suggests labels, and drafts a GitHub issue. Nothing is filed until you press Confirm.</p>
+        <form id="bug-form" class="form" novalidate>
+          <label for="bug-title">Title</label>
+          <input id="bug-title" name="title" type="text" minlength="5" maxlength="200" required
+                 aria-describedby="bug-title-hint">
+          <p id="bug-title-hint" class="hint">5 to 200 characters.</p>
+
+          <label for="bug-description">What happened?</label>
+          <textarea id="bug-description" name="description" rows="5" maxlength="4000" required></textarea>
+
+          <div class="form-row">
+            <div>
+              <label for="bug-platform">Platform</label>
+              <select id="bug-platform" name="platform" required>
+                <option value="pc">PC</option>
+                <option value="ps5">PlayStation 5</option>
+                <option value="xbox_series">Xbox Series</option>
+                <option value="switch">Nintendo Switch</option>
+              </select>
+            </div>
+            <div>
+              <label for="bug-version">Game version</label>
+              <input id="bug-version" name="version" type="text" inputmode="decimal"
+                     pattern="\d+\.\d+\.\d+" maxlength="32" required placeholder="1.4.0"
+                     aria-describedby="bug-version-hint">
+              <p id="bug-version-hint" class="hint">Format: major.minor.patch, for example 1.4.0.</p>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary">Check for duplicates</button>
+        </form>
+
+        <p id="bug-status" class="status-line" role="status" aria-live="polite"></p>
+
+        <div id="bug-result" hidden>
+          <h3 id="bug-result-heading" tabindex="-1">Verdict</h3>
+          <p><strong id="bug-verdict" class="verdict"></strong></p>
+          <p id="bug-match" class="meta" hidden></p>
+
+          <div id="file-anyway" class="file-anyway" hidden>
+            <p class="hint" id="file-anyway-hint">Think this is a different bug? You can still draft an issue. It is labelled possible-duplicate and still needs your Confirm.</p>
+            <button type="button" id="file-anyway-btn" class="btn btn-secondary" aria-describedby="file-anyway-hint">File it anyway</button>
+          </div>
+
+          <h3 id="candidates-heading">Similar reports</h3>
+          <p id="candidates-empty" class="hint" hidden>No similar reports were found.</p>
+          <ol id="candidates" class="card-list" aria-labelledby="candidates-heading"></ol>
+
+          <h3>Suggested routing</h3>
+          <dl class="kv">
+            <dt>Component</dt><dd id="routing-component"></dd>
+            <dt>Severity</dt><dd id="routing-severity"></dd>
+            <dt>Labels</dt><dd><ul id="routing-labels" class="tags" aria-label="Routing labels"></ul></dd>
+          </dl>
+
+          <div id="proposal" class="proposal" hidden>
+            <h3 id="proposal-heading" tabindex="-1">Issue preview</h3>
+            <p id="proposal-changed" class="note note-changed" role="alert" hidden></p>
+            <p class="hint">This is exactly what will be filed (AI-assisted draft). Nothing is filed until you press Confirm.</p>
+            <dl class="kv">
+              <dt>Repository</dt><dd id="proposal-repo"></dd>
+              <dt>Title</dt><dd id="proposal-title"></dd>
+              <dt>Labels</dt><dd><ul id="proposal-labels" class="tags" aria-label="Issue labels"></ul></dd>
+              <dt>Expires</dt><dd id="proposal-expires"></dd>
+            </dl>
+            <p class="pre-label" id="proposal-body-label">Body</p>
+            <pre id="proposal-body" class="issue-body" tabindex="0" aria-labelledby="proposal-body-label"></pre>
+            <p id="proposal-disabled" class="note" hidden></p>
+            <div class="button-row">
+              <button type="button" id="confirm-btn" class="btn btn-primary">Confirm and file issue</button>
+              <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel proposal</button>
+            </div>
+            <p id="action-status" class="status-line" role="status" aria-live="polite" tabindex="-1"></p>
+            <p id="action-result" class="success" hidden></p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" id="issues-info" aria-labelledby="issues-heading">
+      <h2 id="issues-heading">Where do issues go?</h2>
+      <p id="sandbox-text">
+        When you press Confirm, StudioDesk files the issue on GitHub in a public sandbox
+        repository, <a id="sandbox-link" href="https://github.com/raksharakyan/starfall-outpost-issues/issues" rel="noopener noreferrer">raksharakyan/starfall-outpost-issues</a>,
+        so you can see the result. A Slack alert may be sent as well.
+      </p>
+      <p id="sandbox-missing" class="note" hidden>No sandbox repository is connected on this server, so issues cannot be filed here. You can still try duplicate checks and see the issue preview.</p>
+      <p>Nothing is ever filed without your click on <strong>Confirm and file issue</strong>; the voice agent cannot confirm. To keep this public demo cheap and tidy, it has daily limits:</p>
+      <ul class="limits" aria-live="polite">
+        <li id="limit-actions">Issue filing: checking today's limit…</li>
+        <li id="limit-voice">Voice calls: checking today's limit…</li>
+      </ul>
+    </section>
+
+    <section class="panel" id="voice" aria-labelledby="voice-heading">
+      <h2 id="voice-heading">Talk to StudioDesk</h2>
+      <p id="mic-explainer" class="hint">
+        Voice mode needs your microphone so the agent can hear you. Your browser will ask for
+        permission when you start. Audio is streamed to ElevenLabs only while the conversation
+        is on; press the button again to stop. Issues are never filed by voice: you confirm them
+        on this page.
+      </p>
+      <p id="voice-limit-line" class="meta" hidden></p>
+      <div class="voice-controls">
+        <button type="button" id="voice-toggle" class="btn btn-primary voice-toggle"
+                aria-pressed="false" aria-describedby="mic-explainer">
+          <span class="toggle-state" aria-hidden="true" data-role="toggle-state">Off</span>
+          <span data-role="toggle-label">Start voice conversation</span>
+        </button>
+        <div class="voice-state">
+          <p id="voice-status" class="status-line" role="status" aria-live="polite">
+            Status: <span data-role="status-text">Disconnected</span>
+          </p>
+          <p class="mode-line" data-mode="idle" id="voice-mode">
+            <span class="mode-dot" aria-hidden="true"></span>
+            <span data-role="mode-text">Agent idle</span>
+          </p>
+          <p id="voice-hint" class="hint voice-hint" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+      <div id="proposal-banner" class="banner" hidden>
+        <p class="banner-text">Issue preview ready — review it in "Report a bug"</p>
+        <button type="button" id="proposal-banner-btn" class="btn btn-primary">Go to the issue preview</button>
+      </div>
+      <p id="voice-error" class="error" role="alert" hidden></p>
+      <button type="button" id="voice-fallback" class="btn btn-secondary" hidden>Type a question instead</button>
+
+      <h3 id="say-heading">Things to say</h3>
+      <ul class="say-list" aria-labelledby="say-heading">
+        <li>"Is the cryo sleep save bug on PS5 fixed yet?"</li>
+        <li>"What changed in patch 1.3.1?"</li>
+        <li>"I want to report a bug: my hover-rover falls through the map on Switch, version 1.4.0." <span class="meta">(It checks for duplicates and shows the issue preview above for you to confirm.)</span></li>
+      </ul>
+
+      <h3 id="transcript-heading">Transcript</h3>
+      <p id="transcript-empty" class="hint">The conversation will appear here once voice mode is on.</p>
+      <ol id="transcript" class="transcript" aria-live="polite" aria-relevant="additions"
+          aria-labelledby="transcript-heading"></ol>
+    </section>
+
+    <section class="panel" id="how" aria-labelledby="how-heading">
+      <h2 id="how-heading">How it works</h2>
+      <figure class="flow-figure">
+        <figcaption id="flow-caption" class="visually-hidden">StudioDesk pipeline, from documents to a cited answer or a confirmed GitHub issue.</figcaption>
+        <ol class="flow" aria-describedby="flow-caption">
+          <li><strong>Documents</strong><span>bug reports, crash logs, patch notes, support docs</span></li>
+          <li><strong>Embeddings</strong><span>sentence-transformers</span></li>
+          <li><strong>Qdrant</strong><span>vector search with filters</span></li>
+          <li><strong>Retrieval</strong><span>top matches as untrusted, delimited data</span></li>
+          <li><strong>LLM</strong><span>Groq or Claude</span></li>
+        </ol>
+        <div class="flow-branches">
+          <div class="flow-branch">
+            <p class="flow-branch-title">Questions</p>
+            <ol class="flow">
+              <li><strong>Cited answer</strong><span>citations checked against what was retrieved</span></li>
+            </ol>
+          </div>
+          <div class="flow-branch">
+            <p class="flow-branch-title">Bug reports</p>
+            <ol class="flow">
+              <li><strong>Duplicate check</strong><span>similarity plus an AI judge, then routing labels</span></li>
+              <li><strong>Human Confirm</strong><span>you review the preview and click</span></li>
+              <li><strong>GitHub issue</strong><span>filed in the sandbox repo, plus a Slack alert</span></li>
+            </ol>
+          </div>
+        </div>
+      </figure>
+
+      <h3 id="scores-heading">Eval scores</h3>
+      <p class="hint">From the project's offline eval suite on the synthetic dataset (see the <a id="link-evals-2" href="https://github.com/raksharakyan/studiodesk/blob/main/evals/reports/latest.md" rel="noopener noreferrer">eval report</a>).</p>
+      <dl class="scores" aria-labelledby="scores-heading">
+        <div><dt>Retrieval hit@5</dt><dd>1.00</dd></div>
+        <div><dt>Citation validity</dt><dd>1.00</dd></div>
+        <div><dt>Duplicates, held-out precision / recall</dt><dd>1.00 / 1.00</dd></div>
+        <div><dt>Prompt-injection cases resisted</dt><dd>14 / 14</dd></div>
+        <div class="score-weak"><dt>Routing component accuracy</dt><dd>0.57 <span class="meta">(our weakest area)</span></dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Built with Claude Code using dev, QA, security and UI subagents. <a id="link-footer-repo" href="https://github.com/raksharakyan/studiodesk" rel="noopener noreferrer">View the source on GitHub</a>.</p>
+    <p>Answers, reasons and issue previews are AI-generated from a fictional dataset. Check them before acting.</p>
+  </footer>
+</body>
+</html>

@@ -47,7 +47,7 @@ EXPECTED_CSP = (
     "worker-src 'self' blob:; "
     "base-uri 'none'; "
     "form-action 'none'; "
-    "frame-ancestors 'none'"
+    "frame-ancestors https://huggingface.co"
 )
 EXPECTED_SECURITY_HEADERS = {
     "content-security-policy": EXPECTED_CSP,
