@@ -35,6 +35,8 @@ TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("ElevenLabs key", re.compile(rb"\bsk_[0-9a-f]{32,}")),
     ("Slack token", re.compile(rb"\bxox[abp]-[A-Za-z0-9-]{10,}")),
     ("Slack webhook", re.compile(rb"hooks\.slack\.com/services/")),
+    # Real cluster hosts only; the documented placeholder "your-cluster" is allowed.
+    ("Qdrant Cloud cluster URL", re.compile(rb"(?<!your-cluster)\.cloud\.qdrant\.io")),
 )
 
 
