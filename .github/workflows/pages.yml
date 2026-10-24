@@ -1,0 +1,60 @@
+name: Pages
+
+# Static showcase (recorded results, no backend): validate site/data/showcase.json, build
+# _site/ and publish it to GitHub Pages. No secrets are used. Third-party actions are pinned
+# by full commit SHA; the comment gives the version.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Build and check the site
+        # Schema check of showcase.json + secret pattern scan; no network, no .env.
+        run: uv run python scripts/build_site.py
+
+      - name: Configure Pages
+        uses: actions/configure-pages@TODO_SHA # TODO: pin latest v5 tag by full SHA
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@TODO_SHA # TODO: pin latest tag by full SHA
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@TODO_SHA # TODO: pin latest v4 tag by full SHA
