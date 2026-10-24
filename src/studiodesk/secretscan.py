@@ -119,3 +119,28 @@ def scan_bytes(data: bytes, needles: Sequence[bytes]) -> str | None:
     if any(needle in data for needle in needles):
         return "contains a secret value from .env (raw or encoded)"
     return None
+
+
+def scan_json(document: object, needles: Sequence[bytes], path: str = "$") -> str | None:
+    """Scan every key and string in a parsed JSON document; return the first finding.
+
+    The finding names the JSON path (e.g. `$.questions[0].response.answer`) and the kind
+    of match, never the matched text.
+    """
+    if isinstance(document, str):
+        reason = scan_bytes(document.encode("utf-8"), needles)
+        return f"{path} {reason}" if reason is not None else None
+    if isinstance(document, dict):
+        for key, value in document.items():
+            child = f"{path}.{key}"
+            finding = scan_json(str(key), needles, f"{child} (key)") or scan_json(
+                value, needles, child
+            )
+            if finding is not None:
+                return finding
+    elif isinstance(document, list):
+        for index, item in enumerate(document):
+            finding = scan_json(item, needles, f"{path}[{index}]")
+            if finding is not None:
+                return finding
+    return None
