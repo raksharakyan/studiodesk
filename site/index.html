@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- GitHub Pages cannot set response headers, so the policy is a meta tag (frame-ancestors
+       is ignored in meta and therefore omitted). Only same-origin scripts, styles and JSON. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Recorded demo of StudioDesk, an AI support and QA agent for game studios: cited answers, duplicate bug detection and human-confirmed GitHub issues.">
+  <title>StudioDesk (recorded demo): AI support &amp; QA agent for game studios</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/styles.css">
+  <link rel="stylesheet" href="assets/site.css">
+  <!-- Replay only: reads data/showcase.json (same origin). No SDK, no microphone, no API calls. -->
+  <script type="module" src="showcase.js"></script>
+</head>
+<body class="home">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header hero">
+    <div class="replay-banner" id="replay-banner" role="note">
+      <p id="replay-banner-text">
+        <strong>This is a recorded demo:</strong> every answer below was produced by the real
+        StudioDesk pipeline (<span id="banner-llm">its LLM</span>, Qdrant, MiniLM) on
+        <span id="banner-date">the recording date</span>. To run it live with your own keys,
+        see the <a id="banner-repo" href="https://github.com/raksharakyan/studiodesk" rel="noopener noreferrer">GitHub repo</a>.
+      </p>
+    </div>
+
+    <h1>StudioDesk — <span class="title-sub">AI support &amp; QA agent for game studios</span></h1>
+    <p class="lead">
+      StudioDesk answers player and QA questions with cited sources, spots duplicate bug
+      reports before they reach your tracker, and drafts GitHub issues that are filed only
+      after a person presses Confirm. It searches the studio's own bug reports, crash logs,
+      patch notes and support docs, and you can use it by typing or by talking to it.
+    </p>
+    <p class="note demo-note">
+      <strong>Demo data:</strong> the game <em>Starfall Outpost</em> is fictional. The knowledge
+      base holds <span id="count-bugs">66</span> bug reports, <span id="count-crashes">25</span> crash logs,
+      <span id="count-patches">10</span> patch notes and <span id="count-docs">4</span> support docs,
+      all made up for this demo.
+    </p>
+    <nav aria-label="Project links">
+      <ul class="link-row">
+        <li><a id="link-repo" href="https://github.com/raksharakyan/studiodesk" rel="noopener noreferrer">Source code on GitHub</a></li>
+        <li><a id="link-evals" href="https://github.com/raksharakyan/studiodesk/blob/main/evals/reports/latest.md" rel="noopener noreferrer">Eval report</a></li>
+        <li><a id="link-security" href="https://github.com/raksharakyan/studiodesk/tree/main/docs/security" rel="noopener noreferrer">Security reviews</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main" class="home-main" tabindex="-1">
+    <noscript><p class="note">This recorded demo needs JavaScript to show the recorded results. You can read the source and eval report on GitHub.</p></noscript>
+    <p id="load-status" class="status-line" role="status" aria-live="polite">Loading the recorded results…</p>
+    <p id="load-error" class="error" role="alert" hidden>The recorded results could not be loaded. Reload the page, or see the GitHub repo to run StudioDesk yourself.</p>
+
+    <section class="panel" id="try" aria-labelledby="try-heading">
+      <h2 id="try-heading">Try these</h2>
+      <p class="hint">Each button shows what StudioDesk returned for that example when it was recorded.</p>
+
+      <h3 id="try-questions-heading">Ask a question</h3>
+      <ul id="question-chips" class="chips" aria-labelledby="try-questions-heading"></ul>
+
+      <h3 id="try-bugs-heading">Report a bug</h3>
+      <ul class="chips chips-bugs" aria-labelledby="try-bugs-heading">
+        <li>
+          <button type="button" class="chip" data-bug="duplicate" aria-pressed="false" aria-describedby="chip-dup-note" disabled>Try a duplicate</button>
+          <p id="chip-dup-note" class="chip-caption">A player's own words for a bug that is already on file.</p>
+        </li>
+        <li>
+          <button type="button" class="chip" data-bug="new" aria-pressed="false" aria-describedby="chip-new-note" disabled>Try a new bug</button>
+          <p id="chip-new-note" class="chip-caption">Not reported before, so StudioDesk drafts an issue for you to review.</p>
+        </li>
+        <li>
+          <button type="button" class="chip" data-bug="injection" aria-pressed="false" aria-describedby="chip-inj-note" disabled>Try a prompt injection</button>
+          <p id="chip-inj-note" class="chip-caption">The report tells the AI to "ignore all previous instructions". StudioDesk treats report text as data, never as instructions, and shows it as plain text.</p>
+        </li>
+      </ul>
+    </section>
+
+    <div class="home-grid">
+      <section class="panel" id="ask" aria-labelledby="ask-heading">
+        <h2 id="ask-heading">Ask a question</h2>
+        <p class="note" id="live-note">
+          Live questions need the backend; see
+          <a id="link-run-it" href="https://github.com/raksharakyan/studiodesk#run-it-yourself" rel="noopener noreferrer">Run it yourself in the README</a>.
+          Pick a recorded question above to see its answer.
+        </p>
+        <p id="ask-status" class="status-line" role="status" aria-live="polite"></p>
+
+        <div id="answer-panel">
+          <p id="answer-empty" class="hint">The recorded answer and the sources it cites appear here.</p>
+          <div id="answer-content" hidden>
+            <h3 id="answer-question-heading" tabindex="-1">Answer <span class="ai-badge">AI-generated</span></h3>
+            <p id="answer-question" class="meta"></p>
+            <p id="answer-text" class="answer-text"></p>
+            <p id="answer-notes" class="note" hidden></p>
+            <h3 id="sources-heading">Sources</h3>
+            <p class="hint">Documents retrieved from the knowledge base that the answer cites. Citations that don't match a retrieved document are removed.</p>
+            <p id="sources-empty" class="hint" hidden>No sources were cited.</p>
+            <ol id="sources" class="card-list" aria-labelledby="sources-heading"></ol>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="bug-heading" id="bug-panel">
+        <h2 id="bug-heading">Report a bug</h2>
+        <p class="hint">StudioDesk compares a report with existing ones, suggests labels, and drafts a GitHub issue. Nothing is filed until a person presses Confirm.</p>
+        <p id="bug-status" class="status-line" role="status" aria-live="polite"></p>
+        <p id="bug-empty" class="hint">Pick a recorded bug report above to see the duplicate check.</p>
+
+        <div id="bug-result" hidden>
+          <h3 id="bug-report-heading" tabindex="-1">Recorded report</h3>
+          <dl class="kv recorded-report">
+            <dt>Title</dt><dd id="report-title"></dd>
+            <dt>What happened?</dt><dd id="report-description" class="report-text"></dd>
+            <dt>Platform</dt><dd id="report-platform"></dd>
+            <dt>Game version</dt><dd id="report-version"></dd>
+          </dl>
+          <p id="report-file-anyway" class="meta" hidden>Sent again with "File it anyway" turned on.</p>
+
+          <h3 id="bug-result-heading">Verdict</h3>
+          <p><strong id="bug-verdict" class="verdict"></strong></p>
+          <p id="bug-match" class="meta" hidden></p>
+
+          <div id="file-anyway" class="file-anyway" hidden>
+            <p class="hint" id="file-anyway-hint">Think this is a different bug? You can still draft an issue. It is labelled possible-duplicate and still needs your Confirm.</p>
+            <button type="button" id="file-anyway-btn" class="btn btn-secondary" aria-describedby="file-anyway-hint">File it anyway</button>
+          </div>
+
+          <h3 id="candidates-heading">Similar reports</h3>
+          <p id="candidates-empty" class="hint" hidden>No similar reports were found.</p>
+          <ol id="candidates" class="card-list" aria-labelledby="candidates-heading"></ol>
+
+          <h3>Suggested routing</h3>
+          <dl class="kv">
+            <dt>Component</dt><dd id="routing-component"></dd>
+            <dt>Severity</dt><dd id="routing-severity"></dd>
+            <dt>Labels</dt><dd><ul id="routing-labels" class="tags" aria-label="Routing labels"></ul></dd>
+          </dl>
+
+          <p id="no-proposal" class="hint" hidden>No new issue is proposed because this is a duplicate of an existing report.</p>
+
+          <div id="proposal" class="proposal" hidden>
+            <h3 id="proposal-heading" tabindex="-1">Issue preview</h3>
+            <p class="hint">This is exactly what would be filed (AI-assisted draft). Nothing is filed until a person presses Confirm.</p>
+            <dl class="kv">
+              <dt>Repository</dt><dd id="proposal-repo"></dd>
+              <dt>Title</dt><dd id="proposal-title"></dd>
+              <dt>Labels</dt><dd><ul id="proposal-labels" class="tags" aria-label="Issue labels"></ul></dd>
+            </dl>
+            <p class="pre-label" id="proposal-body-label">Body</p>
+            <pre id="proposal-body" class="issue-body" tabindex="0" aria-labelledby="proposal-body-label"></pre>
+            <div class="button-row">
+              <button type="button" id="confirm-btn" class="btn btn-primary" disabled aria-describedby="replay-filing">Confirm and file issue</button>
+              <button type="button" id="cancel-btn" class="btn btn-secondary" disabled aria-describedby="replay-filing">Cancel proposal</button>
+            </div>
+            <p id="replay-filing" class="note replay-filing">
+              <span id="replay-filing-text">Filing is disabled in the recorded demo.</span>
+              <a id="filed-issue-link" href="https://github.com/raksharakyan/starfall-outpost-issues/issues" rel="noopener noreferrer" hidden></a>
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" id="issues-info" aria-labelledby="issues-heading">
+      <h2 id="issues-heading">Where do issues go?</h2>
+      <p id="sandbox-text">
+        When you press Confirm in the live app, StudioDesk files the issue on GitHub in a public
+        sandbox repository, <a id="sandbox-link" href="https://github.com/raksharakyan/starfall-outpost-issues/issues" rel="noopener noreferrer">raksharakyan/starfall-outpost-issues</a>,
+        so you can see the result. A Slack alert may be sent as well.
+      </p>
+      <p>Nothing is ever filed without a click on <strong>Confirm and file issue</strong>; the voice agent cannot confirm. In this recorded demo nothing is filed at all, and the live app keeps daily limits on issue filing and voice calls.</p>
+    </section>
+
+    <section class="panel" id="voice" aria-labelledby="voice-heading">
+      <h2 id="voice-heading">Talk to StudioDesk</h2>
+      <p class="hint">
+        In the live app you can talk to StudioDesk through your microphone (ElevenLabs Agents).
+        It can answer questions and check bug reports by voice, but issues are never filed by
+        voice: you confirm them on the page. This recorded demo plays no audio and never uses
+        your microphone.
+      </p>
+
+      <h3 id="transcript-heading">Recorded voice session (text transcript)</h3>
+      <p id="transcript-empty" class="hint">The recorded transcript appears here once the demo data has loaded.</p>
+      <ol id="transcript" class="transcript" aria-labelledby="transcript-heading"></ol>
+    </section>
+
+    <section class="panel" id="how" aria-labelledby="how-heading">
+      <h2 id="how-heading">How it works</h2>
+      <figure class="flow-figure">
+        <figcaption id="flow-caption" class="visually-hidden">StudioDesk pipeline, from documents to a cited answer or a confirmed GitHub issue.</figcaption>
+        <ol class="flow" aria-describedby="flow-caption">
+          <li><strong>Documents</strong><span>bug reports, crash logs, patch notes, support docs</span></li>
+          <li><strong>Embeddings</strong><span>sentence-transformers</span></li>
+          <li><strong>Qdrant</strong><span>vector search with filters</span></li>
+          <li><strong>Retrieval</strong><span>top matches as untrusted, delimited data</span></li>
+          <li><strong>LLM</strong><span>Groq or Claude</span></li>
+        </ol>
+        <div class="flow-branches">
+          <div class="flow-branch">
+            <p class="flow-branch-title">Questions</p>
+            <ol class="flow">
+              <li><strong>Cited answer</strong><span>citations checked against what was retrieved</span></li>
+            </ol>
+          </div>
+          <div class="flow-branch">
+            <p class="flow-branch-title">Bug reports</p>
+            <ol class="flow">
+              <li><strong>Duplicate check</strong><span>similarity plus an AI judge, then routing labels</span></li>
+              <li><strong>Human Confirm</strong><span>you review the preview and click</span></li>
+              <li><strong>GitHub issue</strong><span>filed in the sandbox repo, plus a Slack alert</span></li>
+            </ol>
+          </div>
+        </div>
+      </figure>
+
+      <h3 id="scores-heading">Eval scores</h3>
+      <p class="hint">From the project's offline eval suite on the synthetic dataset (see the <a id="link-evals-2" href="https://github.com/raksharakyan/studiodesk/blob/main/evals/reports/latest.md" rel="noopener noreferrer">eval report</a>).</p>
+      <dl class="scores" id="scores" aria-labelledby="scores-heading">
+        <div><dt>Retrieval hit@5</dt><dd data-eval="retrieval_hit_at_5">…</dd></div>
+        <div><dt>Citation validity</dt><dd data-eval="citation_validity">…</dd></div>
+        <div><dt>Duplicates, held-out precision / recall</dt><dd data-eval="duplicates_heldout">…</dd></div>
+        <div><dt>Prompt-injection cases resisted</dt><dd data-eval="injection_pass">…</dd></div>
+        <div class="score-weak"><dt>Routing component accuracy</dt><dd><span data-eval="routing_component_accuracy">…</span> <span class="meta">(our weakest area)</span></dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Built with Claude Code using dev, QA, security and UI subagents. <a id="link-footer-repo" href="https://github.com/raksharakyan/studiodesk" rel="noopener noreferrer">View the source on GitHub</a>.</p>
+    <p>Answers, reasons and issue previews are AI-generated from a fictional dataset. Check them before acting.</p>
+  </footer>
+</body>
+</html>
