@@ -29,3 +29,6 @@ htmlcov/
 
 # Local embedded Qdrant store
 .qdrant_data/
+
+# Static site build output (scripts/build_site.py)
+_site/
