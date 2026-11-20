@@ -123,7 +123,7 @@ All settings are listed in [`.env.example`](.env.example). Your `.env` is gitign
 |---|---|---|
 | `GROQ_API_KEY` | `/ask`, `/bugs/check`, evals | Groq free tier (console.groq.com). Set `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` to use Claude instead. |
 | `QDRANT_URL`, `QDRANT_API_KEY` | Qdrant Cloud | Free cluster. Leave `QDRANT_URL` empty to use embedded local mode (`.qdrant_data/`). For `evals.run --qdrant cloud`, use a read-only key scoped to the collection. |
-| `GITHUB_TOKEN`, `GITHUB_REPO` | Filing issues | Fine-grained PAT for **one** sandbox repo with **Issues: Read and write** and nothing else. |
+| `GITHUB_TOKEN`, `GITHUB_REPO` | Filing issues | Fine-grained PAT for **one** sandbox repo with **Issues: Read and write** and nothing else, with a short expiry. |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | Voice | Restrict the key to **ElevenAgents: Write** and set a credit limit on it. The key never leaves the server. |
 | `SLACK_WEBHOOK_URL` | Optional alerts | Incoming webhook. Only `https://hooks.slack.com/...` is accepted; leave it empty to disable. |
 | `HF_TOKEN` | `scripts/deploy_hf_space.py` only | Write token, used only on your machine and never copied to the Space. Docker Spaces need HF PRO. |
@@ -182,7 +182,7 @@ Each item covers what was decided, why, and what it costs.
    *Cost:* every filing takes an extra round trip. A failed GitHub call burns the token, so the user re-submits rather than risking a duplicate issue.
 
 8. **Voice as a thin orchestrator: browser client tools, no confirm tool.**
-   *Why:* The voice agent reuses the same validated API, and spoken or injected text cannot file anything. The agent is private: sessions need a server-minted signed URL, auth is enabled and hosts are allowlisted. Only `first_message` can be overridden by the client. Calls are capped at 180 s and 30 sessions per day.
+   *Why:* The voice agent reuses the same validated API, and spoken or injected text cannot file anything. The agent is private: sessions need a server-minted signed URL, auth is enabled and hosts are allowlisted. Only `first_message` can be overridden by the client. Calls are capped at 180 s and 30 sessions per day per process (the count resets on restart).
    *Cost:* the user must look at the screen to confirm. Tool calls depend on the browser tab staying open, and the agent's LLM (`gemini-2.0-flash`, set in `VOICE_LLM`) is a separate model to watch.
 
 9. **Prompt-injection posture: delimit, then verify on the server.**
@@ -195,10 +195,10 @@ Each item covers what was decided, why, and what it costs.
 
 11. **In-memory per-process state.**
     *Why:* Proposals, the voice quota, the LLM budget and the rate limiter use in-process stores with locks, which keeps the system simple and fully testable on a single process.
-    *Cost:* with N workers a confirm only works on the process that created the proposal, caps multiply by N, and a restart clears everything ([M6 #3](docs/security/m6-review.md)).
+    *Cost:* with N workers a confirm only works on the process that created the proposal, caps multiply by N, and a restart clears everything ([M3 #8](docs/security/m3-review.md), [M6 #3](docs/security/m6-review.md)).
 
 12. **A static GitHub Pages showcase instead of a paid host.**
-    *Why:* Hugging Face Docker Spaces now require PRO ([m6-review](docs/security/m6-review.md)). A static replay of real recorded results costs nothing, exposes no keys and cannot be abused. `scripts/deploy_hf_space.py` is ready for a live deploy.
+    *Why:* Hugging Face Docker Spaces now require PRO ([m6-review](docs/security/m6-review.md)). A static replay of real recorded results costs nothing, exposes no keys and has no quota or actions to abuse. `scripts/deploy_hf_space.py` is ready for a live deploy.
     *Cost:* visitors cannot ask their own questions. The showcase shows one recording (2026-10-24), not live behaviour.
 
 ## What I'd do next

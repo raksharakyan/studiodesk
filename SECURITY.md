@@ -23,7 +23,7 @@ StudioDesk is a portfolio project. Its public deliverable is a static GitHub Pag
 | Browser → API | API | All request fields, headers, `X-Forwarded-For` |
 | API → LLM provider | API | Model output (answers, reasons, cited ids) |
 | API → Qdrant | API | Stored chunk text, which may be poisoned |
-| API → GitHub / Slack | Remote services | Nothing from the model; only server-built content goes out |
+| API → GitHub / Slack | Remote services | No model text; only server-built content goes out (a model verdict can at most add the allowlisted `possible-duplicate` label and our own ids) |
 | Browser ⇄ ElevenLabs | API (holds the key) | Transcripts and tool-call arguments chosen by the voice agent |
 
 ## Controls
@@ -31,7 +31,7 @@ StudioDesk is a portfolio project. Its public deliverable is a static GitHub Pag
 ### Secrets
 - All keys are `SecretStr` in `studiodesk.config.Settings`, read from the environment or `.env`. `.env` is ignored by git and Docker, and `.env.example` holds placeholders that count as unset.
 - Log redaction covers messages, extras, tracebacks and JSON-escaped secrets. uvicorn logs go through the same handler. `hide_input_in_errors` is set, and errors carry only class names or HTTP statuses.
-- Outbound clients use `trust_env=False`. `qdrant_url` rejects userinfo, query and fragment, and must be HTTPS except on localhost.
+- The GitHub, Slack and ElevenLabs clients use `trust_env=False`, and the Groq and Anthropic SDK clients pin their base URL so env overrides cannot redirect them. `qdrant_url` rejects userinfo, query and fragment, and must be HTTPS except on localhost.
 - The ElevenLabs key never reaches the browser. Signed URLs are returned with `Cache-Control: no-store` and never logged.
 - `secretscan.py` checks every published artifact (Space upload, `showcase.json`, `_site/`). It looks for known token shapes, configured secret values in raw, base64, URL- and JSON-encoded forms, and Qdrant cluster hosts.
 
@@ -47,12 +47,12 @@ StudioDesk is a portfolio project. Its public deliverable is a static GitHub Pag
 - **Token design.** Tokens are `secrets.token_urlsafe(32)` (256-bit). Only the SHA-256 digest is stored, it is compared with `hmac.compare_digest`, and claiming is atomic and tested under concurrency. Tokens are single-use with a 15-minute TTL (`ACTION_TTL_S=900`). A wrong token or unknown id returns 404, a replay 409 and an expired token 410.
 - **Caps and kill switches.** `ACTIONS_ENABLED` is off by default in prod. `ACTIONS_MAX_PER_DAY=20` is reserved at claim time and freed if creation fails.
 - **Content.** User fields go inside fences longer than any backtick run they contain. `@mentions` and `#N` / `owner/repo#N` references in titles are broken with a zero-width joiner. Labels come from a fixed allowlist (`actions/labels.py`, created by `scripts/setup_issue_labels.py`).
-- **Transport.** Hosts are pinned (`api.github.com`, `hooks.slack.com`, `api.groq.com`, `api.anthropic.com`, `api.elevenlabs.io`), redirects are not followed, every call has a timeout, and the returned `html_url` is checked exactly. Slack messages are plain text with `<`, `>` and `&` escaped and mentions neutralised.
+- **Transport.** Hosts are pinned (`api.github.com`, `hooks.slack.com`, `api.groq.com`, `api.anthropic.com`, `api.elevenlabs.io`). The GitHub, Slack and ElevenLabs clients do not follow redirects. Every call has a timeout, and the returned `html_url` is checked exactly. Slack messages are plain text with `<`, `>` and `&` escaped and mentions neutralised.
 - **Credentials.** The GitHub token is a fine-grained PAT for one repository with Issues read/write only.
 
 ### Voice
 - Only two client tools exist (`ask_studiodesk`, `check_bug_report`) and there is no confirm tool. The only built-in tool is `skip_turn`. The agent cannot replace a pending proposal, and Confirm arms after 3 s and accepts only `isTrusted` clicks.
-- The agent is private (`enable_auth` with a host allowlist). Only `first_message` can be overridden by the client. Calls are capped at 180 s (`voice/agent.json`). `VOICE_ENABLED` is off in prod, and `VOICE_MAX_SESSIONS_PER_DAY=30` reserves a slot before ElevenLabs is called.
+- The agent is private (`enable_auth` with a host allowlist). Only `first_message` can be overridden by the client. Calls are capped at 180 s (`voice/agent.json`). `VOICE_ENABLED` is off in prod, and `VOICE_MAX_SESSIONS_PER_DAY=30` (per process; it resets on restart) reserves a slot before ElevenLabs is called.
 
 ### Abuse and cost
 - Per-IP rate limits via slowapi. IPv6 is keyed by /64. `X-Forwarded-For` is honoured only from `TRUSTED_PROXY_IPS` and resolved right to left. Prod defaults are `ask 3/minute;30/day`, `bugs 3/minute;20/day`, `actions 2/minute;5/day` and `voice 2/minute;5/day`.
@@ -69,10 +69,10 @@ StudioDesk is a portfolio project. Its public deliverable is a static GitHub Pag
 - `uv.lock` is committed and CI runs `uv sync --frozen`. `pip-audit` blocks the build, and a second audit covers the public torch version (pip-audit skips `+cpu` builds).
 - GitHub Actions are pinned by full commit SHA, `actions/checkout` runs with `persist-credentials: false`, and both Docker base images are pinned by digest.
 - The embedding model is pinned to revision `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` with `trust_remote_code=False` and is downloaded only at build time. On Linux, torch comes from an explicit CPU-only index (`pyproject.toml`), which prevents dependency confusion.
-- The container runs as non-root uid 1000 with root-owned app files, and the CI smoke test checks both.
+- The container runs as non-root uid 1000 with root-owned app files (`Dockerfile`), and the CI smoke test checks the uid.
 
 ### Deploy and showcase
-- `scripts/deploy_hf_space.py` stages only `git ls-files`, aborts on untracked files, secret-scans the upload, never copies `HF_TOKEN` and rejects public proxy ranges for `TRUSTED_PROXY_IPS`.
+- `scripts/deploy_hf_space.py` stages only `git ls-files`, aborts on untracked files, secret-scans the upload, never copies `HF_TOKEN` and rejects public proxy ranges for `TRUSTED_PROXY_IPS` unless `--force-public-proxy` is passed.
 - `scripts/record_showcase.py` calls only `/ask` and `/bugs/check`. GitHub and Slack are replaced by stand-ins that raise if called, and tokens and action ids are nulled before writing.
 - `.github/workflows/pages.yml` runs only on pushes to `main` and manual dispatch, never on fork PRs. The build job is `contents: read`; only the deploy job, which runs pinned GitHub actions and no project code, gets `pages: write` and `id-token: write`.
 
@@ -105,6 +105,8 @@ All Medium findings are fixed or mitigated. M6 #2 (proxy IP) is mitigated and ca
   - A restart resets the in-memory daily caps. The backstop is provider-side limits: an ElevenLabs credit cap and the Groq free tier (M6 #3, Low, accepted).
   - The public sandbox repo can receive spam issues, bounded by the prod limit of `actions 2/minute;5/day` per IP and `ACTIONS_MAX_PER_DAY=20` per process (M6 #4, Low, accepted).
 - **No auth by design.** A real deployment needs auth and per-user quotas.
+- **LLM SDK clients.** The Groq/Anthropic SDK clients use their libraries' default redirect and proxy-environment behaviour (hosts are pinned); hardening them like the GitHub/ElevenLabs clients is a next step.
+- **Accepted risks** (see the reviews): embedded local Qdrant persists with pickle, so `.qdrant_data/` must be trusted; prod requires `QDRANT_URL` (M2 #9, Info). The local eval cache is unauthenticated (gitignored; M4 #7, Info). The vendored SDK README/LICENSE are served publicly (M5 #10, Info). The other M6 deploy Info items (#8–13) are listed in the [M6 review](docs/security/m6-review.md).
 
 ## Reporting a vulnerability
 
